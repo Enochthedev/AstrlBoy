@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from core.logging import get_logger
+from db.base import _normalize_db_url
 
 logger = get_logger("db.client_db")
 
@@ -41,7 +42,7 @@ class ClientDBManager:
         Returns:
             An AsyncEngine for the client's database.
         """
-        eng = create_async_engine(db_url, echo=False, pool_size=5, max_overflow=10)
+        eng = create_async_engine(_normalize_db_url(db_url), echo=False, pool_size=5, max_overflow=10)
         self._engines[contract_id] = eng
         self._session_factories[contract_id] = async_sessionmaker(
             eng,
