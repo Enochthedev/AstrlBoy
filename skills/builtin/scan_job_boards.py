@@ -122,7 +122,7 @@ class ScanJobBoardsSkill(BaseTool):
             entity_type="job_scan",
             entity_id=dump_id,
             data={
-                "model": "claude-sonnet-4-5",
+                "model": "claude-haiku-4-5",
                 "keywords": keywords,
                 "sources": normalized_sources,
                 "posted_within_days": posted_within_days,
@@ -254,7 +254,7 @@ class ScanJobBoardsSkill(BaseTool):
 
         try:
             response = await self._anthropic.messages.create(
-                model="claude-sonnet-4-5",
+                model="claude-haiku-4-5",
                 max_tokens=2048,
                 system=(
                     "You are a job relevance scorer for astrlboy, an autonomous AI agent "

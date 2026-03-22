@@ -63,8 +63,19 @@ class DraftApprovalSkill(BaseTool):
         try:
             # Create an Interaction record if none exists
             if not interaction_id:
+                # Resolve contract_id from slug if available
+                contract_id = None
+                if contract_slug:
+                    try:
+                        from contracts.service import contracts_service
+                        contract = await contracts_service.get_contract(contract_slug)
+                        contract_id = contract.id
+                    except Exception:
+                        pass  # Self-posts won't have a contract — that's fine
+
                 async with async_session_factory() as session:
                     interaction = Interaction(
+                        contract_id=contract_id,
                         platform=platform,
                         draft=draft,
                         status=InteractionStatus.PENDING,

@@ -235,7 +235,7 @@ async def analyze_patterns() -> dict:
     ) if bottom else "No low-performing data yet."
 
     response = await client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5",
         max_tokens=1000,
         system=(
             "Analyze these tweet performance metrics and identify patterns.\n"

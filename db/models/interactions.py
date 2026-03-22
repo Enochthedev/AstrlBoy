@@ -23,8 +23,8 @@ class Interaction(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    contract_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("contracts.id"), nullable=False
+    contract_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("contracts.id"), nullable=True
     )
     platform: Mapped[str] = mapped_column(String(50), nullable=False)
     thread_url: Mapped[str | None] = mapped_column(Text, nullable=True)

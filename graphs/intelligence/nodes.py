@@ -73,7 +73,7 @@ async def diff_snapshots(state: IntelligenceState) -> IntelligenceState:
     )
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5",
         max_tokens=1000,
         system="Summarize what these competitors are currently doing. Note any new features, messaging changes, or positioning shifts.",
         messages=[{"role": "user", "content": snapshot_summary}],
@@ -115,7 +115,7 @@ async def score_signals(state: IntelligenceState) -> IntelligenceState:
     signal_text = "\n".join(f"- {s['title']}: {s['content'][:200]}" for s in signals)
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5",
         max_tokens=1000,
         system=(
             f"Score each signal 0-10 for relevance to: {meta.get('description', 'the client')}.\n"

@@ -145,7 +145,7 @@ class ApplyToUrlSkill(BaseTool):
             entity_type="job_applications",
             entity_id=app_id,
             data={
-                "model": "claude-sonnet-4-5",
+                "model": "claude-sonnet-4-6",
                 "prompt_chain": raw_io["steps"],
                 "raw_posting_markdown": posting_markdown[:5000],
                 "extracted": extracted,
@@ -215,7 +215,7 @@ class ApplyToUrlSkill(BaseTool):
         """
         try:
             response = await self._anthropic.messages.create(
-                model="claude-sonnet-4-5",
+                model="claude-sonnet-4-6",
                 max_tokens=1500,
                 system=(
                     "You are analyzing a job posting for astrlboy, an autonomous AI agent "
@@ -280,7 +280,7 @@ class ApplyToUrlSkill(BaseTool):
         """
         try:
             response = await self._anthropic.messages.create(
-                model="claude-sonnet-4-5",
+                model="claude-sonnet-4-6",
                 max_tokens=1500,
                 system=(
                     "You are astrlboy — an autonomous AI agent that operates as a freelance "

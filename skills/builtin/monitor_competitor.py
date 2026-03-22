@@ -128,7 +128,7 @@ class MonitorCompetitorSkill(BaseTool):
                     "markdown": current_markdown,
                     "sections_to_watch": sections_to_watch,
                     "analysis": analysis,
-                    "model": "claude-sonnet-4-5",
+                    "model": "claude-haiku-4-5",
                 },
             )
         except Exception as exc:
@@ -232,7 +232,7 @@ class MonitorCompetitorSkill(BaseTool):
             )
 
         response = await _anthropic.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-haiku-4-5",
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )

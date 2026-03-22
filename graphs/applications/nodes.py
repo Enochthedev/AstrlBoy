@@ -85,7 +85,7 @@ async def score_fit(state: ApplicationState) -> ApplicationState:
     )
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5",
         max_tokens=500,
         system=(
             "Score each job posting 0-10 for fit with an autonomous AI agent that does:\n"

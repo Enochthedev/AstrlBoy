@@ -196,7 +196,7 @@ async def self_critique(state: ContentState) -> ContentState:
     )
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5",
         max_tokens=1000,
         system=system_prompt,
         messages=[{"role": "user", "content": state["draft"]}],
