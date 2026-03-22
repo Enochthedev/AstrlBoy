@@ -27,31 +27,68 @@ _anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
 async def research_trends(state: ContentState) -> ContentState:
     """Pull relevant trend signals and do live research for content context.
 
-    Searches for recent trends using Tavily and pulls existing signals
-    from the DB to give the draft node rich context.
+    Uses analyze_trending_content and research_topic skills when available
+    for richer context. Falls back to raw search otherwise.
     """
     start = time.monotonic()
     contract_meta = state["contract_meta"]
     keywords = contract_meta.get("stream_keywords", [])
-    query = f"{contract_meta.get('description', '')} {' '.join(keywords[:3])}"
 
     research = ""
     trend_signals: list[dict] = []
 
+    # Try analyze_trending_content first — gives patterns + recommended angles
     try:
-        if await skill_registry.is_available("search"):
-            search_skill = await skill_registry.get("search")
-            results = await search_skill.execute(query=query, max_results=5)
-            for r in results:
-                research += f"**{r.get('title', '')}**\n{r.get('content', '')}\n\n"
-                trend_signals.append({
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "snippet": r.get("content", "")[:200],
-                })
+        if await skill_registry.is_available("analyze_trending_content") and keywords:
+            analyze_skill = await skill_registry.get("analyze_trending_content")
+            result = await analyze_skill.execute(topics=keywords[:5], timeframe_hours=48)
+            if isinstance(result, dict):
+                for thread in result.get("top_threads", []):
+                    research += f"**{thread.get('title', thread.get('summary', ''))}**\n"
+                    if thread.get("why_it_worked"):
+                        research += f"Why it worked: {thread['why_it_worked']}\n"
+                    research += "\n"
+                    trend_signals.append(thread)
+                if result.get("content_patterns"):
+                    research += "Content patterns working now:\n"
+                    research += "\n".join(f"- {p}" for p in result["content_patterns"]) + "\n\n"
+                if result.get("recommended_angles"):
+                    research += "Recommended angles:\n"
+                    research += "\n".join(f"- {a}" for a in result["recommended_angles"]) + "\n\n"
     except Exception as exc:
-        logger.warning("research_failed", error=str(exc))
-        research = "No research available — proceeding with existing knowledge."
+        logger.warning("trending_analysis_failed", error=str(exc))
+
+    # Supplement with research_topic for deeper context
+    try:
+        if not research and await skill_registry.is_available("research_topic"):
+            topic = f"{contract_meta.get('description', '')} {' '.join(keywords[:3])}"
+            research_skill = await skill_registry.get("research_topic")
+            result = await research_skill.execute(topic=topic, depth="surface")
+            if isinstance(result, dict):
+                research = result.get("summary", "")
+                if result.get("content_angles"):
+                    research += "\n\nContent angles:\n"
+                    research += "\n".join(f"- {a}" for a in result["content_angles"])
+    except Exception as exc:
+        logger.warning("research_topic_failed", error=str(exc))
+
+    # Final fallback to raw search
+    if not research:
+        try:
+            if await skill_registry.is_available("search"):
+                query = f"{contract_meta.get('description', '')} {' '.join(keywords[:3])}"
+                search_skill = await skill_registry.get("search")
+                results = await search_skill.execute(query=query, max_results=5)
+                for r in results:
+                    research += f"**{r.get('title', '')}**\n{r.get('content', '')}\n\n"
+                    trend_signals.append({
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "snippet": r.get("content", "")[:200],
+                    })
+        except Exception as exc:
+            logger.warning("research_failed", error=str(exc))
+            research = "No research available — proceeding with existing knowledge."
 
     duration = int((time.monotonic() - start) * 1000)
     await agent_service.log_action(
@@ -282,16 +319,32 @@ async def publish(state: ContentState) -> ContentState:
 
     if settings.agent_auto:
         # Auto mode — post immediately
+        tweet_id = None
         for platform in platforms:
             skill_name = f"post_{platform}"
             if await skill_registry.is_available(skill_name):
                 try:
                     skill = await skill_registry.get(skill_name)
-                    await skill.execute(text=state["draft"][:280] if platform == "x" else state["draft"])
+                    result = await skill.execute(text=state["draft"][:280] if platform == "x" else state["draft"])
+                    # Store tweet_id for performance tracking
+                    if platform == "x" and isinstance(result, dict) and result.get("tweet_id"):
+                        tweet_id = result["tweet_id"]
+                        # Update the content record with the tweet_id
+                        try:
+                            from sqlalchemy import update
+                            async with async_session_factory() as session:
+                                await session.execute(
+                                    update(Content)
+                                    .where(Content.id == state["content_id"])
+                                    .values(tweet_id=tweet_id, status="published", platform="x")
+                                )
+                                await session.commit()
+                        except Exception:
+                            pass
                     logger.info("content_published", platform=platform, contract_slug=state["contract_slug"])
                 except Exception as exc:
                     logger.error("publish_failed", platform=platform, error=str(exc))
-        return {**state, "status": "published"}
+        return {**state, "status": "published", "tweet_id": tweet_id}
     else:
         # Manual mode — send to Telegram for approval
         if await skill_registry.is_available("draft_approval"):

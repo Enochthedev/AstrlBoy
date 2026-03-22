@@ -623,12 +623,16 @@ async def cmd_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle free-form text messages as instructions to astrlboy.
+    """Handle free-form text messages using the autonomous agent.
 
-    Accepts natural language like:
-    - "write a tweet about AI agents taking over"
-    - "what's trending in crypto right now?"
-    - "post something about the latest Claude update"
+    The autonomous agent has access to ALL registered skills as tools.
+    Claude decides which tools to call based on the instruction.
+
+    Examples:
+    - "write a tweet about AI agents taking over" → searches trends, drafts, posts
+    - "what's trending in crypto?" → uses search + analyze_trending_content
+    - "find accounts to follow in the AI space" → uses find_relevant_accounts + follow_x
+    - "research what people think about Claude" → uses extract_sentiment + research_topic
     """
     # Only respond to the operator's chat
     if str(update.effective_chat.id) != settings.telegram_chat_id:
@@ -641,79 +645,41 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("On it...")
 
     try:
-        _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        from agent.autonomous import run_autonomous
 
-        # Get recent tweets to avoid repeats
-        recent_tweets_context = ""
-        from skills.registry import skill_registry
-        if await skill_registry.is_available("get_timeline"):
-            try:
-                timeline_skill = await skill_registry.get("get_timeline")
-                recent = await timeline_skill.execute(max_results=5)
-                if recent:
-                    recent_tweets_context = (
-                        "\n\nYour recent tweets (DO NOT repeat these topics):\n"
-                        + "\n".join(f"- {t['text'][:100]}" for t in recent)
-                    )
-            except Exception:
-                pass
+        # Get the active contract for context (default: astrlboy's own)
+        contract = None
+        try:
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(Contract).where(Contract.status == ContractStatus.ACTIVE).limit(1)
+                )
+                contract = result.scalar_one_or_none()
+        except Exception:
+            pass
 
-        # Determine intent and generate content
-        response = await _client.messages.create(
-            model="claude-sonnet-4-5-20250514",
-            max_tokens=1000,
-            system=(
-                "You are astrlboy, an AI personality building its audience on X.\n"
-                "Your operator Wave is giving you an instruction via Telegram.\n\n"
-                "Rules:\n"
-                "- If they want a tweet, write it (max 280 chars)\n"
-                "- Sound human, sharp, opinionated — never corporate or generic\n"
-                "- No hashtags unless specifically asked\n"
-                "- No emojis spam\n"
-                "- Cut filler, every word earns its place\n"
-                f"{recent_tweets_context}\n\n"
-                "Respond in this exact format:\n"
-                "ACTION: tweet (or 'reply' if you need to know what to reply to)\n"
-                "CONTENT:\n<the tweet text>"
-            ),
-            messages=[{"role": "user", "content": user_text}],
+        # Run the autonomous agent with all skills available
+        agent_result = await run_autonomous(
+            task=user_text,
+            contract=contract,
         )
 
-        text = response.content[0].text
+        # Send result back — split long messages
+        response_text = agent_result.text or "Done (no text output)."
+        tool_summary = ""
+        if agent_result.tool_calls:
+            tools_used = list({tc["tool"] for tc in agent_result.tool_calls})
+            tool_summary = f"\n\n[{agent_result.turns} turns | tools: {', '.join(tools_used)}]"
 
-        # Parse response
-        if "ACTION: tweet" in text and "CONTENT:" in text:
-            tweet_text = text.split("CONTENT:", 1)[1].strip()[:280]
+        full_response = response_text + tool_summary
 
-            if not await skill_registry.is_available("post_x"):
-                await update.message.reply_text(f"Draft (post_x unavailable):\n\n{tweet_text}")
-            elif settings.agent_auto:
-                # Auto mode — post immediately
-                post_skill = await skill_registry.get("post_x")
-                result = await post_skill.execute(text=tweet_text)
-                await update.message.reply_text(f"Posted:\n\n{tweet_text}\n\nTweet ID: {result['tweet_id']}")
-            else:
-                # Manual mode — save as pending interaction and ask for approval
-                async with async_session_factory() as session:
-                    interaction = Interaction(
-                        platform="x",
-                        draft=tweet_text,
-                        status=InteractionStatus.PENDING,
-                        thread_context=f"Free-form from Telegram: {user_text}",
-                    )
-                    session.add(interaction)
-                    await session.commit()
-                    interaction_id = str(interaction.id)
-
-                await update.message.reply_text(
-                    f"MANUAL MODE — draft saved for approval:\n\n"
-                    f"{tweet_text}\n\n"
-                    f"/approve {interaction_id}\n"
-                    f"/reject {interaction_id}"
-                )
+        # Telegram max message length is 4096
+        if len(full_response) <= 4096:
+            await update.message.reply_text(full_response)
         else:
-            # Not a tweet request — just reply with the response
-            await update.message.reply_text(text[:4000])
+            # Split into chunks
+            for i in range(0, len(full_response), 4096):
+                await update.message.reply_text(full_response[i:i + 4096])
 
     except Exception as exc:
         logger.error("free_message_failed", error=str(exc))
@@ -749,9 +715,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /experiments — running experiments\n"
         "  /jobs — recent job applications\n"
         "  /escalations — unresolved escalations\n\n"
-        "Or just send a message like:\n"
+        "Free-form (autonomous agent)\n"
+        "  Just send any message — astrlboy has access to ALL\n"
+        "  27 skills and decides what to do:\n"
         "  'write a tweet about AI agents'\n"
-        "  'post something about the latest tech drama'\n"
+        "  'find accounts to follow in the AI space'\n"
+        "  'research what people think about Claude'\n"
+        "  'analyze trending content in crypto'\n"
+        "  'check competitors and summarize changes'\n"
     )
     await update.message.reply_text(help_text)
 

@@ -196,6 +196,130 @@ async def run_mentions_job() -> None:
             logger.error("mentions_job_failed", error=str(exc))
 
 
+# Follow-back check — Daily 14:00 WAT
+async def run_follow_back_job() -> None:
+    """Check new followers and follow back relevant ones."""
+    if await agent_service.is_paused():
+        return
+    async with redis_lock("follow_back_job") as acquired:
+        if not acquired:
+            return
+        try:
+            from skills.registry import skill_registry
+
+            if not await skill_registry.is_available("follow_back_x"):
+                return
+
+            follow_back_skill = await skill_registry.get("follow_back_x")
+            results = await follow_back_skill.execute(check_since_hours=24)
+            followed = sum(1 for r in results if r.get("followed_back"))
+            logger.info("follow_back_completed", total=len(results), followed=followed)
+        except Exception as exc:
+            logger.error("follow_back_job_failed", error=str(exc))
+
+
+# Keyword ranking tracking — Weekly Wed 07:00 WAT
+async def run_keyword_tracking_job() -> None:
+    """Track keyword rankings for all active contracts."""
+    if await agent_service.is_paused():
+        return
+    async with redis_lock("keyword_tracking_job") as acquired:
+        if not acquired:
+            return
+        try:
+            from skills.registry import skill_registry
+
+            if not await skill_registry.is_available("track_keyword_rankings"):
+                return
+
+            tracking_skill = await skill_registry.get("track_keyword_rankings")
+            contracts = await contracts_service.get_active_contracts()
+            for contract in contracts:
+                keywords = (contract.meta or {}).get("stream_keywords", [])
+                if keywords:
+                    try:
+                        await tracking_skill.execute(
+                            keywords=keywords[:10],
+                            contract_slug=contract.client_slug,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "keyword_tracking_failed",
+                            slug=contract.client_slug,
+                            error=str(exc),
+                        )
+        except Exception as exc:
+            logger.error("keyword_tracking_job_failed", error=str(exc))
+
+
+# Autonomous growth sweep — Daily 15:00 WAT
+async def run_growth_job() -> None:
+    """Autonomous growth: find accounts, analyze trends, find engagement opportunities."""
+    if await agent_service.is_paused():
+        return
+    async with redis_lock("growth_job") as acquired:
+        if not acquired:
+            return
+        try:
+            from agent.autonomous import run_autonomous
+
+            contracts = await contracts_service.get_active_contracts()
+            for contract in contracts:
+                keywords = (contract.meta or {}).get("stream_keywords", [])
+                if not keywords:
+                    continue
+
+                # Let the autonomous agent decide what growth actions to take
+                task = (
+                    f"You are running a scheduled growth sweep for {contract.client_name}.\n"
+                    f"Topics: {', '.join(keywords[:5])}\n\n"
+                    "Do the following:\n"
+                    "1. Use find_engagement_opportunities to find threads worth engaging with\n"
+                    "2. Use analyze_trending_content to understand what's performing well\n"
+                    "3. Use find_relevant_accounts to discover accounts worth following\n"
+                    "4. Follow 2-3 of the most relevant accounts you found\n"
+                    "5. Summarize what you found and did.\n\n"
+                    "Be selective — quality over quantity."
+                )
+                try:
+                    result = await run_autonomous(
+                        task=task,
+                        contract=contract,
+                        max_turns=10,
+                    )
+                    logger.info(
+                        "growth_sweep_completed",
+                        slug=contract.client_slug,
+                        turns=result.turns,
+                        tools_used=len(result.tool_calls),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "growth_sweep_failed",
+                        slug=contract.client_slug,
+                        error=str(exc),
+                    )
+        except Exception as exc:
+            logger.error("growth_job_failed", error=str(exc))
+
+
+# Performance metrics collection — Daily 20:00 WAT
+async def run_performance_job() -> None:
+    """Collect engagement metrics for published posts to build the playbook."""
+    if await agent_service.is_paused():
+        return
+    async with redis_lock("performance_job") as acquired:
+        if not acquired:
+            return
+        try:
+            from agent.playbook import collect_performance_metrics
+
+            updated = await collect_performance_metrics()
+            logger.info("performance_job_completed", updated=updated)
+        except Exception as exc:
+            logger.error("performance_job_failed", error=str(exc))
+
+
 def create_scheduler() -> AsyncIOScheduler:
     """Create and configure the APScheduler instance with all jobs.
 
@@ -259,6 +383,34 @@ def create_scheduler() -> AsyncIOScheduler:
         CronTrigger(hour="*/2", minute=30, timezone=tz),
         id="mentions_job",
         name="Mention check + reply — Every 2 hours",
+    )
+
+    scheduler.add_job(
+        run_follow_back_job,
+        CronTrigger(hour=14, minute=0, timezone=tz),
+        id="follow_back_job",
+        name="Follow-back check — Daily 14:00 WAT",
+    )
+
+    scheduler.add_job(
+        run_keyword_tracking_job,
+        CronTrigger(day_of_week="wed", hour=7, minute=0, timezone=tz),
+        id="keyword_tracking_job",
+        name="Keyword ranking tracking — Weekly Wed 07:00 WAT",
+    )
+
+    scheduler.add_job(
+        run_growth_job,
+        CronTrigger(hour=15, minute=0, timezone=tz),
+        id="growth_job",
+        name="Autonomous growth sweep — Daily 15:00 WAT",
+    )
+
+    scheduler.add_job(
+        run_performance_job,
+        CronTrigger(hour=20, minute=0, timezone=tz),
+        id="performance_job",
+        name="Performance metrics collection — Daily 20:00 WAT",
     )
 
     return scheduler

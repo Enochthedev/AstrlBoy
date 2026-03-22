@@ -25,20 +25,39 @@ _anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
 async def scrape_competitors(state: IntelligenceState) -> IntelligenceState:
-    """Scrape each competitor website listed in the contract meta."""
+    """Scrape each competitor website and detect changes since last check.
+
+    Uses the monitor_competitor skill for semantic diffing when available,
+    falls back to raw scrape otherwise.
+    """
     meta = state["contract_meta"]
     competitors = meta.get("competitors", [])
     snapshots: list[dict] = []
 
-    if await skill_registry.is_available("scrape"):
-        scrape = await skill_registry.get("scrape")
-        for competitor in competitors:
-            try:
-                url = competitor if competitor.startswith("http") else f"https://{competitor}"
+    # Prefer monitor_competitor skill — does semantic diff + R2 snapshots
+    use_monitor = await skill_registry.is_available("monitor_competitor")
+
+    for competitor in competitors:
+        url = competitor if competitor.startswith("http") else f"https://{competitor}"
+        try:
+            if use_monitor:
+                monitor = await skill_registry.get("monitor_competitor")
+                result = await monitor.execute(
+                    competitor_url=url,
+                    contract_slug=state["contract_slug"],
+                )
+                snapshots.append({
+                    "url": url,
+                    "content": str(result.get("changes", [])),
+                    "changes_detected": result.get("changes_detected", False),
+                    "new_content": result.get("new_content", []),
+                })
+            elif await skill_registry.is_available("scrape"):
+                scrape = await skill_registry.get("scrape")
                 content = await scrape.execute(url=url)
                 snapshots.append({"url": url, "content": content[:3000]})
-            except Exception as exc:
-                logger.warning("competitor_scrape_failed", url=competitor, error=str(exc))
+        except Exception as exc:
+            logger.warning("competitor_scrape_failed", url=url, error=str(exc))
 
     return {**state, "competitor_snapshots": snapshots}
 

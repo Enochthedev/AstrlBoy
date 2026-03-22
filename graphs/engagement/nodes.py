@@ -25,15 +25,43 @@ _anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
 async def find_threads(state: EngagementState) -> EngagementState:
-    """Search for relevant threads to engage with on the target platform."""
+    """Search for relevant threads to engage with on the target platform.
+
+    Uses find_engagement_opportunities skill when available for better
+    scoring and suggested angles. Falls back to raw search otherwise.
+    """
     meta = state["contract_meta"]
     keywords = meta.get("stream_keywords", [])
-    query = f"{meta.get('description', '')} {' '.join(keywords[:3])}"
+    platform = state.get("platform", "x")
 
     candidates: list[dict] = []
-    if await skill_registry.is_available("search"):
-        search = await skill_registry.get("search")
+
+    # Prefer the dedicated engagement opportunities skill
+    if await skill_registry.is_available("find_engagement_opportunities"):
         try:
+            opportunities_skill = await skill_registry.get("find_engagement_opportunities")
+            results = await opportunities_skill.execute(
+                topics=keywords[:5],
+                platforms=[platform],
+                min_engagement=5,
+                max_age_hours=12,
+            )
+            for r in results:
+                candidates.append({
+                    "title": r.get("summary", ""),
+                    "url": r.get("url", ""),
+                    "context": r.get("why_relevant", ""),
+                    "suggested_angle": r.get("suggested_angle", ""),
+                    "score": r.get("score", 0),
+                })
+        except Exception as exc:
+            logger.warning("engagement_opportunities_failed", error=str(exc))
+
+    # Fallback to raw search if no results
+    if not candidates and await skill_registry.is_available("search"):
+        query = f"{meta.get('description', '')} {' '.join(keywords[:3])}"
+        try:
+            search = await skill_registry.get("search")
             results = await search.execute(query=query, max_results=10)
             for r in results:
                 candidates.append({

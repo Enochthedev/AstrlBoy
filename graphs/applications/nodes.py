@@ -23,18 +23,43 @@ _anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
 async def scan_job_boards(state: ApplicationState) -> ApplicationState:
-    """Search for relevant job postings using Tavily and Serper."""
+    """Search for relevant job postings.
+
+    Uses the dedicated scan_job_boards skill when available for better
+    dedup and relevance scoring. Falls back to raw search otherwise.
+    """
     postings: list[dict] = []
 
-    queries = [
-        "AI agent developer freelance contract remote",
-        "autonomous agent engineer contract hire",
-        "LLM developer freelance opportunity",
-    ]
+    # Prefer the dedicated job scanning skill — handles dedup + scoring
+    if await skill_registry.is_available("scan_job_boards"):
+        try:
+            scan_skill = await skill_registry.get("scan_job_boards")
+            results = await scan_skill.execute(
+                keywords=[
+                    "AI agent developer freelance",
+                    "autonomous agent contract",
+                    "LLM developer freelance",
+                    "agentic AI contractor",
+                ],
+                posted_within_days=3,
+            )
+            for r in results:
+                postings.append({
+                    "title": r.get("role", r.get("title", "")),
+                    "url": r.get("url", ""),
+                    "description": r.get("snippet", r.get("description", ""))[:500],
+                    "score": r.get("relevance_score", 0),
+                })
+        except Exception as exc:
+            logger.warning("scan_job_boards_failed", error=str(exc))
 
-    if await skill_registry.is_available("search"):
+    # Fallback to raw search
+    if not postings and await skill_registry.is_available("search"):
         search = await skill_registry.get("search")
-        for query in queries:
+        for query in [
+            "AI agent developer freelance contract remote",
+            "autonomous agent engineer contract hire",
+        ]:
             try:
                 results = await search.execute(query=query, max_results=5)
                 for r in results:
@@ -90,63 +115,76 @@ async def score_fit(state: ApplicationState) -> ApplicationState:
 
 
 async def draft_application(state: ApplicationState) -> ApplicationState:
-    """Draft a cover note for each selected posting."""
+    """Draft and send applications for each selected posting.
+
+    Uses the apply_to_url skill when available — it handles scraping,
+    fit scoring, drafting, and sending/escalating in one call.
+    Falls back to manual Claude drafting otherwise.
+    """
     selected = state.get("selected", [])
     sent = 0
 
+    # Prefer the dedicated apply_to_url skill — handles the full pipeline
+    use_apply_skill = await skill_registry.is_available("apply_to_url")
+
     for posting in selected:
-        response = await _anthropic.messages.create(
-            model="claude-sonnet-4-5-20250514",
-            max_tokens=500,
-            system=(
-                "You are astrlboy writing a job application from agent@astrlboy.xyz.\n"
-                "Write a short, sharp cover note (3-4 paragraphs max).\n"
-                "Highlight: autonomous operation, multi-client management, content + community expertise.\n"
-                "Do not sound like an AI. Be direct and specific."
-            ),
-            messages=[{"role": "user", "content": f"Job: {posting['title']}\n{posting['description']}"}],
-        )
-
-        cover_note = response.content[0].text
-
-        # Save to DB
-        app_id = uuid4()
-        async with async_session_factory() as session:
-            application = JobApplication(
-                id=app_id,
-                role=posting["title"],
-                company=posting.get("url", "").split("/")[2] if "/" in posting.get("url", "") else "Unknown",
-                posting_url=posting.get("url", ""),
-                cover_note=cover_note,
-                status="sent",
-            )
-            session.add(application)
-            await session.commit()
-
-        # Send via email
-        if await skill_registry.is_available("send_email"):
-            try:
-                email_skill = await skill_registry.get("send_email")
-                # In production, the recipient would be extracted from the posting
-                logger.info("application_prepared", role=posting["title"], app_id=str(app_id))
-                sent += 1
-            except Exception as exc:
-                logger.warning("application_send_failed", error=str(exc))
-
-        # Dump to R2
         try:
-            await r2_client.dump(
-                contract_slug="astrlboy",
-                entity_type="job_applications",
-                entity_id=app_id,
-                data={
-                    "role": posting["title"],
-                    "posting_url": posting.get("url", ""),
-                    "cover_note": cover_note,
-                    "model": "claude-sonnet-4-5-20250514",
-                },
-            )
-        except Exception:
-            pass
+            if use_apply_skill and posting.get("url"):
+                apply_skill = await skill_registry.get("apply_to_url")
+                result = await apply_skill.execute(url=posting["url"])
+                if result.get("status") == "sent":
+                    sent += 1
+                logger.info(
+                    "application_processed",
+                    role=result.get("role", posting["title"]),
+                    status=result.get("status", "unknown"),
+                )
+            else:
+                # Fallback: draft with Claude, save to DB
+                response = await _anthropic.messages.create(
+                    model="claude-sonnet-4-5-20250514",
+                    max_tokens=500,
+                    system=(
+                        "You are astrlboy writing a job application from agent@astrlboy.xyz.\n"
+                        "Write a short, sharp cover note (3-4 paragraphs max).\n"
+                        "Highlight: autonomous operation, multi-client management, content + community expertise.\n"
+                        "Do not sound like an AI. Be direct and specific."
+                    ),
+                    messages=[{"role": "user", "content": f"Job: {posting['title']}\n{posting.get('description', '')}"}],
+                )
+
+                cover_note = response.content[0].text
+                app_id = uuid4()
+                async with async_session_factory() as session:
+                    application = JobApplication(
+                        id=app_id,
+                        role=posting["title"],
+                        company=posting.get("url", "").split("/")[2] if "/" in posting.get("url", "") else "Unknown",
+                        posting_url=posting.get("url", ""),
+                        cover_note=cover_note,
+                        status="drafted",
+                    )
+                    session.add(application)
+                    await session.commit()
+
+                logger.info("application_drafted", role=posting["title"], app_id=str(app_id))
+
+                # Dump to R2
+                try:
+                    await r2_client.dump(
+                        contract_slug="astrlboy",
+                        entity_type="job_applications",
+                        entity_id=app_id,
+                        data={
+                            "role": posting["title"],
+                            "posting_url": posting.get("url", ""),
+                            "cover_note": cover_note,
+                            "model": "claude-sonnet-4-5-20250514",
+                        },
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("application_failed", role=posting.get("title", ""), error=str(exc))
 
     return {**state, "sent_count": sent, "status": "complete"}

@@ -8,7 +8,7 @@ to the raw model I/O dump in R2 for future training.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,7 +34,15 @@ class Content(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
     platform: Mapped[str | None] = mapped_column(String(50), nullable=True)
     r2_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Engagement metrics — populated by performance tracking job
+    tweet_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    likes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retweets: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    replies: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    impressions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    engagement_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metrics_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
