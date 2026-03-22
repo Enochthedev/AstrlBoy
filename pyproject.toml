@@ -34,6 +34,9 @@ dependencies = [
 
     # Social
     "tweepy>=4.14.0",
+    "aiohttp>=3.9.0",
+    "async_lru>=2.0.0",
+    "oauthlib>=3.2.0",
 
     # Email
     "aiosmtplib>=3.0.0",

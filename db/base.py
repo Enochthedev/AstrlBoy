@@ -18,11 +18,13 @@ from core.config import settings
 
 
 def _normalize_db_url(url: str) -> str:
-    """Ensure the URL uses the asyncpg driver, not bare postgresql://."""
+    """Ensure the URL uses the asyncpg driver and fix Neon SSL params."""
     if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    # asyncpg uses 'ssl', not 'sslmode' (Neon default includes ?sslmode=require)
+    url = url.replace("sslmode=", "ssl=")
     return url
 
 
