@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "alembic upgrade head && python main.py"
+startCommand = "PYTHONPATH=/app alembic upgrade head && python main.py"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
 healthcheckPath = "/health"

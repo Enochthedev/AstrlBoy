@@ -114,9 +114,9 @@ async def score_threads(state: EngagementState) -> EngagementState:
 
 
 async def filter_threads(state: EngagementState) -> EngagementState:
-    """Keep only threads scoring 7 or above."""
+    """Keep only threads scoring 7 or above, capped at 5 per run."""
     scored = state.get("scored_threads", [])
-    filtered = [t for t in scored if t.get("score", 0) >= 7]
+    filtered = [t for t in scored if t.get("score", 0) >= 7][:5]
     return {**state, "filtered_threads": filtered}
 
 

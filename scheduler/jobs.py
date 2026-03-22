@@ -141,7 +141,11 @@ async def run_experiments_job() -> None:
 
 # Mention check + reply — Every 2 hours
 async def run_mentions_job() -> None:
-    """Check for mentions of @astrlboy_ and reply."""
+    """Check for mentions of @astrlboy_ and reply.
+
+    Tracks the last processed mention ID in Redis to avoid re-replying
+    to the same mentions across runs.
+    """
     if await agent_service.is_paused():
         return
     async with redis_lock("mentions_job") as acquired:
@@ -150,6 +154,7 @@ async def run_mentions_job() -> None:
         try:
             from anthropic import AsyncAnthropic
 
+            from cache.redis import redis_client
             from core.config import settings
             from skills.registry import skill_registry
 
@@ -162,7 +167,21 @@ async def run_mentions_job() -> None:
             post_skill = await skill_registry.get("post_x")
             _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
-            mentions = await mentions_skill.execute(max_results=10)
+            # Fetch since_id from Redis to skip already-processed mentions
+            since_id = None
+            if redis_client:
+                since_id = await redis_client.get("astrlboy:mentions:since_id")
+
+            mentions = await mentions_skill.execute(
+                max_results=10,
+                **({"since_id": since_id} if since_id else {}),
+            )
+
+            if not mentions:
+                return
+
+            # Track highest mention ID to skip next run
+            highest_id = max(m["id"] for m in mentions)
 
             for m in mentions[:5]:
                 try:
@@ -178,10 +197,8 @@ async def run_mentions_job() -> None:
                     reply_text = response.content[0].text[:280]
 
                     if settings.agent_auto:
-                        # Auto mode — reply immediately
                         await post_skill.execute(text=reply_text, reply_to_id=m["id"])
                     else:
-                        # Manual mode — send to Telegram for approval
                         if await skill_registry.is_available("draft_approval"):
                             approval_skill = await skill_registry.get("draft_approval")
                             await approval_skill.execute(
@@ -192,6 +209,11 @@ async def run_mentions_job() -> None:
                             )
                 except Exception as exc:
                     logger.warning("mention_reply_failed", mention_id=m["id"], error=str(exc))
+
+            # Persist highest ID so next run skips these
+            if redis_client:
+                await redis_client.set("astrlboy:mentions:since_id", highest_id)
+
         except Exception as exc:
             logger.error("mentions_job_failed", error=str(exc))
 
@@ -285,7 +307,7 @@ async def run_growth_job() -> None:
                     result = await run_autonomous(
                         task=task,
                         contract=contract,
-                        max_turns=10,
+                        max_turns=5,
                     )
                     logger.info(
                         "growth_sweep_completed",
