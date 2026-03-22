@@ -12,6 +12,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from api.router import api_router
+from approval.telegram import create_telegram_app
 from cache.redis import close_redis
 from contracts.service import contracts_service
 from core.config import settings
@@ -34,12 +35,13 @@ from skills.registry import skill_registry
 logger = get_logger("main")
 
 _scheduler = None
+_telegram_app = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown lifecycle for the FastAPI application."""
-    global _scheduler
+    global _scheduler, _telegram_app
     setup_logging()
     logger.info("astrlboy starting", agent_name=settings.agent_name)
 
@@ -67,6 +69,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _scheduler.start()
     logger.info("scheduler_started")
 
+    # Start Telegram bot (polling mode, runs alongside FastAPI)
+    try:
+        _telegram_app = create_telegram_app()
+        if _telegram_app:
+            await _telegram_app.initialize()
+            await _telegram_app.start()
+            await _telegram_app.updater.start_polling(drop_pending_updates=True)
+            logger.info("telegram_bot_started")
+    except Exception as exc:
+        logger.warning("telegram_bot_start_failed", error=str(exc))
+
     # Start X filtered stream (background)
     try:
         from streams.x_stream import start_stream
@@ -78,6 +91,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Shutdown
     logger.info("astrlboy shutting down")
+    if _telegram_app and _telegram_app.updater:
+        await _telegram_app.updater.stop()
+        await _telegram_app.stop()
+        await _telegram_app.shutdown()
     if _scheduler:
         _scheduler.shutdown(wait=False)
     await client_db_manager.close_all()
