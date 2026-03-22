@@ -20,30 +20,36 @@ from core.config import settings
 
 
 def _normalize_db_url(url: str) -> str:
-    """Ensure the URL uses the asyncpg driver and strip SSL query params.
+    """Ensure the URL uses the asyncpg driver and strip Neon query params.
 
-    SSL is handled via connect_args instead because asyncpg does not
-    accept 'sslmode' and SQLAlchemy's asyncpg dialect can mishandle
-    'ssl' as a query parameter.
+    Neon URLs include params like sslmode, channel_binding, options that
+    asyncpg doesn't accept. We strip all query params and handle SSL
+    via connect_args instead.
     """
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     elif url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
-    # Strip sslmode/ssl from query params — handled via connect_args
-    if "sslmode=" in url or "ssl=" in url:
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query)
-        params.pop("sslmode", None)
-        params.pop("ssl", None)
-        new_query = urlencode(params, doseq=True)
-        url = urlunparse(parsed._replace(query=new_query))
+    # Strip all query params — Neon adds sslmode, channel_binding, etc.
+    # that asyncpg doesn't understand. SSL is handled via connect_args.
+    parsed = urlparse(url)
+    if parsed.query:
+        url = urlunparse(parsed._replace(query=""))
     return url
 
 
 def _ssl_connect_args(url: str) -> dict:
-    """Return connect_args with SSL context if the URL requires SSL."""
-    if "sslmode=" in url or "ssl=" in url:
+    """Return connect_args with SSL context.
+
+    Neon always requires SSL. We detect this from the hostname (.neon.tech)
+    or from sslmode/ssl in the original URL query string.
+    """
+    needs_ssl = (
+        "sslmode=" in url
+        or "ssl=" in url
+        or ".neon.tech" in url
+    )
+    if needs_ssl:
         ctx = _ssl_module.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = _ssl_module.CERT_NONE

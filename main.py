@@ -38,6 +38,71 @@ _scheduler = None
 _telegram_app = None
 
 
+async def _bootstrap_self_contract() -> None:
+    """Create astrlboy's own contract if no contracts exist.
+
+    This gives the agent an objective from day one — grow the @astrlboy__
+    account, engage with trends, build an audience — even before any
+    paying clients are onboarded.
+    """
+    from sqlalchemy import select
+
+    from db.base import async_session_factory
+    from db.models.contracts import Contract
+
+    async with async_session_factory() as session:
+        result = await session.execute(select(Contract).limit(1))
+        if result.scalar_one_or_none() is not None:
+            return  # contracts already exist
+
+        self_contract = Contract(
+            client_name="astrlboy",
+            client_slug="astrlboy",
+            status="active",
+            client_db_url="",  # no separate DB — uses primary
+            meta={
+                "description": (
+                    "astrlboy — an always-on AI personality building its own audience. "
+                    "Primary mission: grow the @astrlboy__ account into a recognized voice. "
+                    "Explore niches, post hot takes, engage with trending topics, reply to threads. "
+                    "Track what gets engagement and double down on what resonates. "
+                    "Niches to explore: AI agents, crypto/web3, tech culture, build-in-public, startup life."
+                ),
+                "website": "https://astrlboy.xyz",
+                "tone": "sharp, opinionated, concise, human, slightly irreverent — never corporate, never generic",
+                "content_types": ["post", "trend"],
+                "competitors": [],
+                "subreddits": [],
+                "discord_servers": [],
+                "stream_keywords": [
+                    "AI agents",
+                    "autonomous AI",
+                    "crypto",
+                    "web3",
+                    "build in public",
+                    "startup",
+                    "tech Twitter",
+                    "AI trends",
+                    "Claude",
+                    "agentic",
+                ],
+                "briefing_recipients": [],
+                "feature_request_endpoint": "",
+                "platforms": ["x"],
+                "active_skills": [
+                    "search",
+                    "serp",
+                    "post_x",
+                    "trend_stream",
+                ],
+            },
+        )
+        session.add(self_contract)
+        await session.commit()
+
+    logger.info("self_contract_bootstrapped")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown lifecycle for the FastAPI application."""
@@ -66,6 +131,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("db_tables_ready")
     except Exception as exc:
         logger.warning("db_init_failed", error=str(exc))
+
+    # Bootstrap astrlboy's own contract if none exist
+    try:
+        await _bootstrap_self_contract()
+    except Exception as exc:
+        logger.warning("bootstrap_failed", error=str(exc))
 
     # Load contract registry
     try:

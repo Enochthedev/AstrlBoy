@@ -32,12 +32,14 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     serper_api_key: str = ""
 
-    # Social — X (OAuth 1.0a for posting + OAuth 2.0 Bearer for streaming)
+    # Social — X (OAuth 1.0a for posting + OAuth 2.0 for app auth)
     twitter_api_key: str = ""
     twitter_api_secret: str = ""
     twitter_access_token: str = ""
     twitter_access_secret: str = ""
     twitter_bearer_token: str = ""
+    twitter_client_id: str = ""
+    twitter_client_secret: str = ""
 
     # Social — LinkedIn
     linkedin_client_id: str = ""

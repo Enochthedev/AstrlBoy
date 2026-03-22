@@ -327,6 +327,166 @@ async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Search for what's trending right now across active contracts.
+
+    Usage: /trending [optional keywords]
+    """
+    await update.message.reply_text("Searching trends...")
+
+    # Use custom keywords if provided, otherwise pull from active contracts
+    custom_query = " ".join(context.args) if context.args else None
+
+    try:
+        from skills.registry import skill_registry
+
+        if not await skill_registry.is_available("search"):
+            await update.message.reply_text("Search skill not available.")
+            return
+
+        search = await skill_registry.get("search")
+
+        if custom_query:
+            query = custom_query
+        else:
+            # Pull keywords from active contracts
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(Contract).where(Contract.status == ContractStatus.ACTIVE)
+                )
+                contracts = result.scalars().all()
+
+            if contracts:
+                keywords = []
+                for c in contracts:
+                    keywords.extend((c.meta or {}).get("stream_keywords", []))
+                query = " ".join(keywords[:5]) or "AI crypto web3 trending"
+            else:
+                query = "AI crypto web3 trending"
+
+        results = await search.execute(query=query, max_results=5)
+        if not results:
+            await update.message.reply_text("Nothing found.")
+            return
+
+        lines = []
+        for r in results:
+            title = r.get("title", "")[:80]
+            snippet = r.get("content", "")[:100]
+            lines.append(f"{title}\n{snippet}...")
+
+        await update.message.reply_text("\n---\n".join(lines))
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
+
+
+async def cmd_makepost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Trigger content generation for an active contract.
+
+    Usage: /makepost [contract_slug]
+    If no slug is provided and there's only one active contract, uses that.
+    """
+    try:
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Contract).where(Contract.status == ContractStatus.ACTIVE)
+            )
+            contracts = result.scalars().all()
+
+        if not contracts:
+            await update.message.reply_text("No active contracts. Create one first via the API.")
+            return
+
+        # If slug provided, find it; otherwise use the only active one
+        if context.args:
+            slug = context.args[0]
+            contract = next((c for c in contracts if c.client_slug == slug), None)
+            if not contract:
+                slugs = ", ".join(c.client_slug for c in contracts)
+                await update.message.reply_text(f"Contract '{slug}' not found. Active: {slugs}")
+                return
+        elif len(contracts) == 1:
+            contract = contracts[0]
+        else:
+            slugs = ", ".join(c.client_slug for c in contracts)
+            await update.message.reply_text(f"Multiple contracts. Specify one:\n/makepost <slug>\n\nActive: {slugs}")
+            return
+
+        await update.message.reply_text(f"Generating content for {contract.client_name}...")
+
+        from graphs.content.graph import content_graph
+        result = await content_graph.run(contract, content_type="post")
+
+        status = result.get("status", "unknown")
+        title = result.get("title", "")
+        draft_preview = (result.get("draft", "")[:200] + "...") if result.get("draft") else ""
+
+        await update.message.reply_text(
+            f"Done — {status}\n"
+            f"Title: {title}\n\n"
+            f"{draft_preview}"
+        )
+    except Exception as exc:
+        logger.error("makepost_failed", error=str(exc))
+        await update.message.reply_text(f"Error: {exc}")
+
+
+async def cmd_addcontract(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add a new client contract.
+
+    Usage: /addcontract <slug> <name> <description>
+    Example: /addcontract mentorable Mentorable Onchain mentorship marketplace on Base
+    """
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: /addcontract <slug> <name> <description>\n\n"
+            "Example:\n/addcontract mentorable Mentorable Onchain mentorship marketplace on Base"
+        )
+        return
+
+    slug = context.args[0].lower()
+    name = context.args[1]
+    description = " ".join(context.args[2:])
+
+    try:
+        async with async_session_factory() as session:
+            # Check if slug already exists
+            result = await session.execute(
+                select(Contract).where(Contract.client_slug == slug)
+            )
+            if result.scalar_one_or_none():
+                await update.message.reply_text(f"Contract '{slug}' already exists.")
+                return
+
+            contract = Contract(
+                client_name=name,
+                client_slug=slug,
+                status="active",
+                client_db_url="",
+                meta={
+                    "description": description,
+                    "website": "",
+                    "tone": "sharp, opinionated, concise",
+                    "content_types": ["post", "trend"],
+                    "competitors": [],
+                    "subreddits": [],
+                    "discord_servers": [],
+                    "stream_keywords": [],
+                    "briefing_recipients": [],
+                    "feature_request_endpoint": "",
+                    "platforms": ["x"],
+                    "active_skills": ["search", "serp", "post_x"],
+                },
+            )
+            session.add(contract)
+            await session.commit()
+
+        await update.message.reply_text(f"Contract '{name}' ({slug}) created and active.")
+        logger.info("contract_created_via_telegram", slug=slug)
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show available commands.
 
@@ -341,6 +501,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /pending — list pending approvals\n"
         "  /approve <id> — approve an interaction\n"
         "  /reject <id> — reject an interaction\n\n"
+        "Actions\n"
+        "  /trending [keywords] — search what's trending\n"
+        "  /makepost [slug] — generate + post content now\n"
+        "  /addcontract — onboard a new client\n\n"
         "Monitor\n"
         "  /status — agent status overview\n"
         "  /contracts — list contracts\n"
@@ -381,5 +545,8 @@ def create_telegram_app():
     app.add_handler(CommandHandler("experiments", cmd_experiments))
     app.add_handler(CommandHandler("jobs", cmd_jobs))
     app.add_handler(CommandHandler("escalations", cmd_escalations))
+    app.add_handler(CommandHandler("trending", cmd_trending))
+    app.add_handler(CommandHandler("makepost", cmd_makepost))
+    app.add_handler(CommandHandler("addcontract", cmd_addcontract))
 
     return app
