@@ -54,7 +54,7 @@ async def generate_feature_requests(state: FeedbackState) -> FeedbackState:
     obs_text = "\n".join(f"- {o['content'][:300]}" for o in observations)
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-5-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1500,
         system=(
             f"Based on observations about {meta.get('description', 'a product')}, generate structured feature requests.\n\n"

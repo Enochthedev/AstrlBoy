@@ -26,7 +26,7 @@ async def generate_ideas(state: ExperimentState) -> ExperimentState:
     meta = state["contract_meta"]
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-5-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1000,
         system=(
             f"You are designing growth experiments for {meta.get('description', 'a client')}.\n"
@@ -94,7 +94,7 @@ async def save_experiment(state: ExperimentState) -> ExperimentState:
                 "title": selected.get("title", ""),
                 "hypothesis": state.get("hypothesis", ""),
                 "execution_plan": state.get("execution_plan", ""),
-                "model": "claude-sonnet-4-5-20250514",
+                "model": "claude-sonnet-4-6",
             },
         )
     except Exception:

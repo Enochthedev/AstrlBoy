@@ -87,7 +87,7 @@ async def score_threads(state: EngagementState) -> EngagementState:
     )
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-5-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=500,
         system=(
             f"Score each thread 0-10 for engagement value for {meta.get('description', 'the client')}.\n"
@@ -128,7 +128,7 @@ async def draft_replies(state: EngagementState) -> EngagementState:
 
     for thread in threads:
         response = await _anthropic.messages.create(
-            model="claude-sonnet-4-5-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=500,
             system=(
                 f"You are astrlboy engaging in a community thread for {meta.get('description', 'a client')}.\n"

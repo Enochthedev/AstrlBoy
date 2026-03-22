@@ -85,7 +85,7 @@ async def score_fit(state: ApplicationState) -> ApplicationState:
     )
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-5-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=500,
         system=(
             "Score each job posting 0-10 for fit with an autonomous AI agent that does:\n"
@@ -142,7 +142,7 @@ async def draft_application(state: ApplicationState) -> ApplicationState:
             else:
                 # Fallback: draft with Claude, save to DB
                 response = await _anthropic.messages.create(
-                    model="claude-sonnet-4-5-20250514",
+                    model="claude-sonnet-4-6",
                     max_tokens=500,
                     system=(
                         "You are astrlboy writing a job application from agent@astrlboy.xyz.\n"
@@ -179,7 +179,7 @@ async def draft_application(state: ApplicationState) -> ApplicationState:
                             "role": posting["title"],
                             "posting_url": posting.get("url", ""),
                             "cover_note": cover_note,
-                            "model": "claude-sonnet-4-5-20250514",
+                            "model": "claude-sonnet-4-6",
                         },
                     )
                 except Exception:

@@ -580,7 +580,7 @@ async def cmd_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for m in mentions[:3]:  # reply to top 3
             try:
                 response = await _client.messages.create(
-                    model="claude-sonnet-4-5-20250514",
+                    model="claude-sonnet-4-6",
                     max_tokens=280,
                     system=(
                         "You are astrlboy, an AI personality on X. Write a reply to this mention.\n"

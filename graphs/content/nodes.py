@@ -144,7 +144,7 @@ async def generate_draft(state: ContentState) -> ContentState:
     )
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-5-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=2000,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
@@ -196,7 +196,7 @@ async def self_critique(state: ContentState) -> ContentState:
     )
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-5-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1000,
         system=system_prompt,
         messages=[{"role": "user", "content": state["draft"]}],
@@ -237,7 +237,7 @@ async def revise(state: ContentState) -> ContentState:
     )
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-5-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=2000,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
@@ -300,7 +300,7 @@ async def save(state: ContentState) -> ContentState:
                 "research": state.get("research", ""),
                 "critique_notes": state.get("critique_notes", ""),
                 "revision_count": state.get("revision_count", 0),
-                "model": "claude-sonnet-4-5-20250514",
+                "model": "claude-sonnet-4-6",
             },
         )
     except Exception:

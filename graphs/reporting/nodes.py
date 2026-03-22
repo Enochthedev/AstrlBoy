@@ -51,7 +51,7 @@ async def synthesize(state: ReportingState) -> ReportingState:
     meta = state["contract_meta"]
 
     response = await _anthropic.messages.create(
-        model="claude-sonnet-4-5-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=2000,
         system=(
             f"You are astrlboy preparing a weekly intelligence briefing for {meta.get('description', 'a client')}.\n\n"
@@ -133,7 +133,7 @@ async def store(state: ReportingState) -> ReportingState:
             contract_slug=state["contract_slug"],
             entity_type="briefings",
             entity_id=briefing_id,
-            data={"briefing": state.get("briefing", ""), "model": "claude-sonnet-4-5-20250514"},
+            data={"briefing": state.get("briefing", ""), "model": "claude-sonnet-4-6"},
         )
     except Exception:
         pass

@@ -157,7 +157,7 @@ async def run_autonomous(
     contract: Contract | None = None,
     system_prompt: str | None = None,
     max_turns: int = 15,
-    model: str = "claude-sonnet-4-5-20250514",
+    model: str = "claude-sonnet-4-6",
 ) -> AgentResult:
     """Run the autonomous agent on a task.
 

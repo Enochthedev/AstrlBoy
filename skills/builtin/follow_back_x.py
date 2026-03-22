@@ -191,7 +191,7 @@ class FollowBackXSkill(BaseTool):
 
         try:
             response = await self._anthropic.messages.create(
-                model="claude-sonnet-4-5-20250514",
+                model="claude-sonnet-4-6",
                 max_tokens=200,
                 system=SCORING_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_summary}],
