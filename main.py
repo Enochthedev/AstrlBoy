@@ -58,6 +58,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # Skills may fail to init if API keys are missing — non-fatal
             logger.warning("skill_init_failed", skill=skill_cls.__name__, error=str(exc))
 
+    # Create database tables if they don't exist
+    try:
+        from db.base import Base, engine
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("db_tables_ready")
+    except Exception as exc:
+        logger.warning("db_init_failed", error=str(exc))
+
     # Load contract registry
     try:
         await contracts_service.load_registry()
