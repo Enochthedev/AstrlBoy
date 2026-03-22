@@ -6,4 +6,4 @@ startCommand = "python main.py"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
 healthcheckPath = "/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 60

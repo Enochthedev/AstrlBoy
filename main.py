@@ -113,9 +113,13 @@ app.include_router(api_router)
 
 
 if __name__ == "__main__":
+    import os
+
+    # Railway assigns a PORT — app must bind to it for healthchecks to reach us
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=port,
         log_level=settings.log_level.lower(),
     )
