@@ -20,16 +20,33 @@ from core.logging import get_logger, setup_logging
 from db.base import close_engine
 from db.client_db import client_db_manager
 from scheduler.jobs import create_scheduler
+from skills.builtin.analyze_trending_content import AnalyzeTrendingContentSkill
+from skills.builtin.apply_to_url import ApplyToUrlSkill
 from skills.builtin.crawl import CrawlSkill
 from skills.builtin.draft_approval import DraftApprovalSkill
+from skills.builtin.extract_sentiment import ExtractSentimentSkill
+from skills.builtin.fetch_page import FetchPageSkill
+from skills.builtin.find_engagement_opportunities import FindEngagementOpportunitiesSkill
+from skills.builtin.find_relevant_accounts import FindRelevantAccountsSkill
+from skills.builtin.follow_back_x import FollowBackXSkill
+from skills.builtin.follow_x import FollowXSkill
+from skills.builtin.generate_hashtag_strategy import GenerateHashtagStrategySkill
+from skills.builtin.get_mentions import GetMentionsSkill
+from skills.builtin.get_timeline import GetTimelineSkill
+from skills.builtin.monitor_competitor import MonitorCompetitorSkill
 from skills.builtin.post_linkedin import PostLinkedInSkill
 from skills.builtin.post_x import PostXSkill
 from skills.builtin.read_email import ReadEmailSkill
+from skills.builtin.reply_x import ReplyXSkill
+from skills.builtin.research_topic import ResearchTopicSkill
+from skills.builtin.scan_job_boards import ScanJobBoardsSkill
 from skills.builtin.scrape import ScrapeSkill
 from skills.builtin.search import SearchSkill
 from skills.builtin.send_email import SendEmailSkill
 from skills.builtin.serp import SerpSkill
+from skills.builtin.track_keyword_rankings import TrackKeywordRankingsSkill
 from skills.builtin.trend_stream import TrendStreamSkill
+from skills.builtin.unfollow_x import UnfollowXSkill
 from skills.registry import skill_registry
 
 logger = get_logger("main")
@@ -41,7 +58,7 @@ _telegram_app = None
 async def _bootstrap_self_contract() -> None:
     """Create astrlboy's own contract if no contracts exist.
 
-    This gives the agent an objective from day one — grow the @astrlboy__
+    This gives the agent an objective from day one — grow the @astrlboy_
     account, engage with trends, build an audience — even before any
     paying clients are onboarded.
     """
@@ -63,7 +80,7 @@ async def _bootstrap_self_contract() -> None:
             meta={
                 "description": (
                     "astrlboy — an always-on AI personality building its own audience. "
-                    "Primary mission: grow the @astrlboy__ account into a recognized voice. "
+                    "Primary mission: grow the @astrlboy_ account into a recognized voice. "
                     "Explore niches, post hot takes, engage with trending topics, reply to threads. "
                     "Track what gets engagement and double down on what resonates. "
                     "Niches to explore: AI agents, crypto/web3, tech culture, build-in-public, startup life."
@@ -93,7 +110,18 @@ async def _bootstrap_self_contract() -> None:
                     "search",
                     "serp",
                     "post_x",
+                    "reply_x",
+                    "follow_x",
+                    "unfollow_x",
+                    "follow_back_x",
+                    "find_relevant_accounts",
+                    "analyze_trending_content",
+                    "find_engagement_opportunities",
+                    "research_topic",
                     "trend_stream",
+                    "get_mentions",
+                    "get_timeline",
+                    "fetch_page",
                 ],
             },
         )
@@ -112,10 +140,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Register all built-in skills
     for skill_cls in [
-        ScrapeSkill, CrawlSkill, SearchSkill, SerpSkill,
-        PostXSkill, PostLinkedInSkill,
+        # Core — data + scraping
+        ScrapeSkill, CrawlSkill, SearchSkill, SerpSkill, FetchPageSkill,
+        # Social — posting + engagement
+        PostXSkill, PostLinkedInSkill, ReplyXSkill,
+        FollowXSkill, UnfollowXSkill, FollowBackXSkill,
+        # Email
         SendEmailSkill, ReadEmailSkill,
+        # Growth — X strategy + audience
+        FindRelevantAccountsSkill, AnalyzeTrendingContentSkill,
+        TrackKeywordRankingsSkill, GenerateHashtagStrategySkill,
+        FindEngagementOpportunitiesSkill,
+        # Intelligence — monitoring + research
+        MonitorCompetitorSkill, ExtractSentimentSkill, ResearchTopicSkill,
+        # Applications — job hunting
+        ScanJobBoardsSkill, ApplyToUrlSkill,
+        # Stream + approval
         TrendStreamSkill, DraftApprovalSkill,
+        GetMentionsSkill, GetTimelineSkill,
     ]:
         try:
             await skill_registry.register(skill_cls())

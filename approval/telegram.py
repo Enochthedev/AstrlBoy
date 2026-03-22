@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import func, select
+from anthropic import AsyncAnthropic
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 from core.config import settings
 from core.constants import (
@@ -58,9 +59,30 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
             interaction.status = InteractionStatus.APPROVED
             interaction.posted_at = datetime.now(timezone.utc)
+            draft_text = interaction.draft
+            platform = interaction.platform
             await session.commit()
 
-        await update.message.reply_text(f"Approved: {interaction_id}")
+        # Post the approved content
+        posted = False
+        if draft_text and platform:
+            try:
+                from skills.registry import skill_registry
+
+                skill_name = f"post_{platform}"
+                if await skill_registry.is_available(skill_name):
+                    skill = await skill_registry.get(skill_name)
+                    result = await skill.execute(text=draft_text[:280] if platform == "x" else draft_text)
+                    posted = True
+                    tweet_id = result.get("tweet_id", "")
+                    await update.message.reply_text(
+                        f"Approved & posted!\n\n{draft_text[:200]}\n\nTweet ID: {tweet_id}"
+                    )
+            except Exception as exc:
+                logger.error("post_after_approve_failed", error=str(exc))
+
+        if not posted:
+            await update.message.reply_text(f"Approved: {interaction_id}")
         logger.info("interaction_approved", interaction_id=interaction_id)
     except Exception as exc:
         await update.message.reply_text(f"Error: {exc}")
@@ -118,6 +140,35 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     logger.info("agent_resumed_via_telegram")
 
 
+async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Switch to auto mode — posts go live without approval.
+
+    Usage: /auto
+    """
+    settings.agent_auto = True
+    await update.message.reply_text(
+        "AUTO MODE ON\n\n"
+        "astrlboy will post, reply, and engage without asking.\n"
+        "Escalations and errors still come to you.\n"
+        "Use /manual to require approval first."
+    )
+    logger.info("auto_mode_enabled")
+
+
+async def cmd_manual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Switch to manual mode — all posts sent for approval first.
+
+    Usage: /manual
+    """
+    settings.agent_auto = False
+    await update.message.reply_text(
+        "MANUAL MODE ON\n\n"
+        "All posts will be sent here for approval before going live.\n"
+        "Use /auto to let astrlboy run free."
+    )
+    logger.info("manual_mode_enabled")
+
+
 # ── Monitoring commands ────────────────────────────────────────────
 
 
@@ -146,15 +197,17 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 )
             )).scalar() or 0
 
+        mode = "AUTO" if settings.agent_auto else "MANUAL"
         status_text = (
-            f"{'PAUSED' if settings.agent_paused else 'RUNNING'}\n"
+            f"{'PAUSED' if settings.agent_paused else 'RUNNING'} | Mode: {mode}\n"
             f"Active contracts: {active_contracts}\n"
             f"Pending approvals: {pending}\n"
             f"Unresolved escalations: {unresolved}"
         )
     except Exception:
+        mode = "AUTO" if settings.agent_auto else "MANUAL"
         status_text = (
-            f"{'PAUSED' if settings.agent_paused else 'RUNNING'}\n"
+            f"{'PAUSED' if settings.agent_paused else 'RUNNING'} | Mode: {mode}\n"
             "(DB unavailable — cannot fetch counts)"
         )
 
@@ -487,6 +540,186 @@ async def cmd_addcontract(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"Error: {exc}")
 
 
+async def cmd_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check recent mentions and reply to them.
+
+    Usage: /mentions
+    """
+    await update.message.reply_text("Checking mentions...")
+
+    try:
+        from skills.registry import skill_registry
+
+        if not await skill_registry.is_available("get_mentions"):
+            await update.message.reply_text("Mentions skill not available.")
+            return
+
+        mentions_skill = await skill_registry.get("get_mentions")
+        mentions = await mentions_skill.execute(max_results=5)
+
+        if not mentions:
+            await update.message.reply_text("No recent mentions.")
+            return
+
+        # Show mentions and generate replies
+        lines = []
+        for m in mentions:
+            lines.append(f"@{m['author_username']}: {m['text'][:120]}")
+
+        await update.message.reply_text("Recent mentions:\n\n" + "\n---\n".join(lines))
+
+        # Generate and post replies
+        if not await skill_registry.is_available("post_x"):
+            return
+
+        post_skill = await skill_registry.get("post_x")
+        _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+        replied = 0
+        pending = 0
+        for m in mentions[:3]:  # reply to top 3
+            try:
+                response = await _client.messages.create(
+                    model="claude-sonnet-4-5-20250514",
+                    max_tokens=280,
+                    system=(
+                        "You are astrlboy, an AI personality on X. Write a reply to this mention.\n"
+                        "Be sharp, concise, human. No AI slop. Max 280 chars.\n"
+                        "If someone is asking a question, answer it. If they're making a point, engage with it."
+                    ),
+                    messages=[{"role": "user", "content": f"@{m['author_username']} said: {m['text']}"}],
+                )
+                reply_text = response.content[0].text[:280]
+
+                if settings.agent_auto:
+                    await post_skill.execute(text=reply_text, reply_to_id=m["id"])
+                    replied += 1
+                else:
+                    # Manual mode — save for approval
+                    async with async_session_factory() as session:
+                        interaction = Interaction(
+                            platform="x",
+                            draft=reply_text,
+                            status=InteractionStatus.PENDING,
+                            thread_context=f"Reply to @{m['author_username']}: {m['text'][:200]}",
+                        )
+                        session.add(interaction)
+                        await session.commit()
+                        pending += 1
+                        await update.message.reply_text(
+                            f"Reply to @{m['author_username']}:\n\n{reply_text}\n\n"
+                            f"/approve {interaction.id}\n/reject {interaction.id}"
+                        )
+            except Exception as exc:
+                logger.warning("mention_reply_failed", mention_id=m["id"], error=str(exc))
+
+        total = min(len(mentions), 3)
+        if settings.agent_auto:
+            await update.message.reply_text(f"Replied to {replied}/{total} mentions.")
+        else:
+            await update.message.reply_text(f"Sent {pending}/{total} replies for approval.")
+    except Exception as exc:
+        await update.message.reply_text(f"Error: {exc}")
+
+
+async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle free-form text messages as instructions to astrlboy.
+
+    Accepts natural language like:
+    - "write a tweet about AI agents taking over"
+    - "what's trending in crypto right now?"
+    - "post something about the latest Claude update"
+    """
+    # Only respond to the operator's chat
+    if str(update.effective_chat.id) != settings.telegram_chat_id:
+        return
+
+    user_text = update.message.text
+    if not user_text:
+        return
+
+    await update.message.reply_text("On it...")
+
+    try:
+        _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+        # Get recent tweets to avoid repeats
+        recent_tweets_context = ""
+        from skills.registry import skill_registry
+        if await skill_registry.is_available("get_timeline"):
+            try:
+                timeline_skill = await skill_registry.get("get_timeline")
+                recent = await timeline_skill.execute(max_results=5)
+                if recent:
+                    recent_tweets_context = (
+                        "\n\nYour recent tweets (DO NOT repeat these topics):\n"
+                        + "\n".join(f"- {t['text'][:100]}" for t in recent)
+                    )
+            except Exception:
+                pass
+
+        # Determine intent and generate content
+        response = await _client.messages.create(
+            model="claude-sonnet-4-5-20250514",
+            max_tokens=1000,
+            system=(
+                "You are astrlboy, an AI personality building its audience on X.\n"
+                "Your operator Wave is giving you an instruction via Telegram.\n\n"
+                "Rules:\n"
+                "- If they want a tweet, write it (max 280 chars)\n"
+                "- Sound human, sharp, opinionated — never corporate or generic\n"
+                "- No hashtags unless specifically asked\n"
+                "- No emojis spam\n"
+                "- Cut filler, every word earns its place\n"
+                f"{recent_tweets_context}\n\n"
+                "Respond in this exact format:\n"
+                "ACTION: tweet (or 'reply' if you need to know what to reply to)\n"
+                "CONTENT:\n<the tweet text>"
+            ),
+            messages=[{"role": "user", "content": user_text}],
+        )
+
+        text = response.content[0].text
+
+        # Parse response
+        if "ACTION: tweet" in text and "CONTENT:" in text:
+            tweet_text = text.split("CONTENT:", 1)[1].strip()[:280]
+
+            if not await skill_registry.is_available("post_x"):
+                await update.message.reply_text(f"Draft (post_x unavailable):\n\n{tweet_text}")
+            elif settings.agent_auto:
+                # Auto mode — post immediately
+                post_skill = await skill_registry.get("post_x")
+                result = await post_skill.execute(text=tweet_text)
+                await update.message.reply_text(f"Posted:\n\n{tweet_text}\n\nTweet ID: {result['tweet_id']}")
+            else:
+                # Manual mode — save as pending interaction and ask for approval
+                async with async_session_factory() as session:
+                    interaction = Interaction(
+                        platform="x",
+                        draft=tweet_text,
+                        status=InteractionStatus.PENDING,
+                        thread_context=f"Free-form from Telegram: {user_text}",
+                    )
+                    session.add(interaction)
+                    await session.commit()
+                    interaction_id = str(interaction.id)
+
+                await update.message.reply_text(
+                    f"MANUAL MODE — draft saved for approval:\n\n"
+                    f"{tweet_text}\n\n"
+                    f"/approve {interaction_id}\n"
+                    f"/reject {interaction_id}"
+                )
+        else:
+            # Not a tweet request — just reply with the response
+            await update.message.reply_text(text[:4000])
+
+    except Exception as exc:
+        logger.error("free_message_failed", error=str(exc))
+        await update.message.reply_text(f"Error: {exc}")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show available commands.
 
@@ -496,7 +729,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "astrlboy commands\n\n"
         "Control\n"
         "  /pause — pause all activity\n"
-        "  /resume — resume activity\n\n"
+        "  /resume — resume activity\n"
+        "  /auto — auto mode (posts without approval)\n"
+        "  /manual — manual mode (all posts need approval)\n\n"
         "Approvals\n"
         "  /pending — list pending approvals\n"
         "  /approve <id> — approve an interaction\n"
@@ -504,6 +739,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Actions\n"
         "  /trending [keywords] — search what's trending\n"
         "  /makepost [slug] — generate + post content now\n"
+        "  /mentions — check and reply to mentions\n"
         "  /addcontract — onboard a new client\n\n"
         "Monitor\n"
         "  /status — agent status overview\n"
@@ -512,7 +748,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /trends — recent trend signals\n"
         "  /experiments — running experiments\n"
         "  /jobs — recent job applications\n"
-        "  /escalations — unresolved escalations\n"
+        "  /escalations — unresolved escalations\n\n"
+        "Or just send a message like:\n"
+        "  'write a tweet about AI agents'\n"
+        "  'post something about the latest tech drama'\n"
     )
     await update.message.reply_text(help_text)
 
@@ -532,6 +771,7 @@ def create_telegram_app():
 
     app = ApplicationBuilder().token(settings.telegram_bot_token).build()
 
+    # Commands
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("approve", cmd_approve))
     app.add_handler(CommandHandler("reject", cmd_reject))
@@ -548,5 +788,11 @@ def create_telegram_app():
     app.add_handler(CommandHandler("trending", cmd_trending))
     app.add_handler(CommandHandler("makepost", cmd_makepost))
     app.add_handler(CommandHandler("addcontract", cmd_addcontract))
+    app.add_handler(CommandHandler("mentions", cmd_mentions))
+    app.add_handler(CommandHandler("auto", cmd_auto))
+    app.add_handler(CommandHandler("manual", cmd_manual))
+
+    # Free-form messages — must be last so commands get priority
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_message))
 
     return app

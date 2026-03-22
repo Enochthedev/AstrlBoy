@@ -139,6 +139,63 @@ async def run_experiments_job() -> None:
                 logger.error("experiments_job_failed", slug=contract.client_slug, error=str(exc))
 
 
+# Mention check + reply — Every 2 hours
+async def run_mentions_job() -> None:
+    """Check for mentions of @astrlboy_ and reply."""
+    if await agent_service.is_paused():
+        return
+    async with redis_lock("mentions_job") as acquired:
+        if not acquired:
+            return
+        try:
+            from anthropic import AsyncAnthropic
+
+            from core.config import settings
+            from skills.registry import skill_registry
+
+            if not await skill_registry.is_available("get_mentions"):
+                return
+            if not await skill_registry.is_available("post_x"):
+                return
+
+            mentions_skill = await skill_registry.get("get_mentions")
+            post_skill = await skill_registry.get("post_x")
+            _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+            mentions = await mentions_skill.execute(max_results=10)
+
+            for m in mentions[:5]:
+                try:
+                    response = await _client.messages.create(
+                        model="claude-sonnet-4-5-20250514",
+                        max_tokens=280,
+                        system=(
+                            "You are astrlboy, an AI personality on X. Reply to this mention.\n"
+                            "Be sharp, concise, human. Max 280 chars. Engage genuinely."
+                        ),
+                        messages=[{"role": "user", "content": f"@{m['author_username']} said: {m['text']}"}],
+                    )
+                    reply_text = response.content[0].text[:280]
+
+                    if settings.agent_auto:
+                        # Auto mode — reply immediately
+                        await post_skill.execute(text=reply_text, reply_to_id=m["id"])
+                    else:
+                        # Manual mode — send to Telegram for approval
+                        if await skill_registry.is_available("draft_approval"):
+                            approval_skill = await skill_registry.get("draft_approval")
+                            await approval_skill.execute(
+                                draft=reply_text,
+                                platform="x",
+                                contract_slug="astrlboy",
+                                title=f"Reply to @{m['author_username']}",
+                            )
+                except Exception as exc:
+                    logger.warning("mention_reply_failed", mention_id=m["id"], error=str(exc))
+        except Exception as exc:
+            logger.error("mentions_job_failed", error=str(exc))
+
+
 def create_scheduler() -> AsyncIOScheduler:
     """Create and configure the APScheduler instance with all jobs.
 
@@ -195,6 +252,13 @@ def create_scheduler() -> AsyncIOScheduler:
         CronTrigger(day_of_week="sun", hour=18, minute=0, timezone=tz),
         id="experiments_job",
         name="Experiment status sweep — Sun 18:00 WAT",
+    )
+
+    scheduler.add_job(
+        run_mentions_job,
+        CronTrigger(hour="*/2", minute=30, timezone=tz),
+        id="mentions_job",
+        name="Mention check + reply — Every 2 hours",
     )
 
     return scheduler

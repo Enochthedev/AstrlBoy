@@ -71,6 +71,20 @@ async def generate_draft(state: ContentState) -> ContentState:
     start = time.monotonic()
     meta = state["contract_meta"]
 
+    # Fetch recent tweets to avoid repeats
+    recent_tweets_context = ""
+    try:
+        if await skill_registry.is_available("get_timeline"):
+            timeline_skill = await skill_registry.get("get_timeline")
+            recent = await timeline_skill.execute(max_results=10)
+            if recent:
+                recent_tweets_context = (
+                    "\n\nYour recent tweets (DO NOT repeat these topics or angles):\n"
+                    + "\n".join(f"- {t['text'][:100]}" for t in recent)
+                )
+    except Exception:
+        pass
+
     system_prompt = (
         f"You are astrlboy, an autonomous AI agent writing content for {meta.get('description', 'a client')}.\n\n"
         f"Tone: {meta.get('tone', 'sharp, opinionated, concise')}\n"
@@ -80,6 +94,8 @@ async def generate_draft(state: ContentState) -> ContentState:
         "- Be opinionated and specific\n"
         "- Cut filler — every sentence should earn its place\n"
         "- No 'in today's world', 'it's important to note', or other AI slop\n"
+        "- No hashtags unless the topic demands it\n"
+        f"{recent_tweets_context}\n"
     )
 
     user_prompt = (
@@ -257,18 +273,37 @@ async def save(state: ContentState) -> ContentState:
 
 
 async def publish(state: ContentState) -> ContentState:
-    """Post the content via the appropriate platform skill."""
+    """Post the content via the appropriate platform skill.
+
+    In manual mode, sends drafts to Telegram for approval instead of posting directly.
+    """
     meta = state["contract_meta"]
     platforms = meta.get("platforms", [])
 
-    for platform in platforms:
-        skill_name = f"post_{platform}"
-        if await skill_registry.is_available(skill_name):
+    if settings.agent_auto:
+        # Auto mode — post immediately
+        for platform in platforms:
+            skill_name = f"post_{platform}"
+            if await skill_registry.is_available(skill_name):
+                try:
+                    skill = await skill_registry.get(skill_name)
+                    await skill.execute(text=state["draft"][:280] if platform == "x" else state["draft"])
+                    logger.info("content_published", platform=platform, contract_slug=state["contract_slug"])
+                except Exception as exc:
+                    logger.error("publish_failed", platform=platform, error=str(exc))
+        return {**state, "status": "published"}
+    else:
+        # Manual mode — send to Telegram for approval
+        if await skill_registry.is_available("draft_approval"):
             try:
-                skill = await skill_registry.get(skill_name)
-                await skill.execute(text=state["draft"][:280] if platform == "x" else state["draft"])
-                logger.info("content_published", platform=platform, contract_slug=state["contract_slug"])
+                approval_skill = await skill_registry.get("draft_approval")
+                await approval_skill.execute(
+                    draft=state["draft"][:280] if "x" in platforms else state["draft"],
+                    platform=platforms[0] if platforms else "x",
+                    contract_slug=state["contract_slug"],
+                    title=state.get("title", ""),
+                )
+                logger.info("draft_sent_for_approval", contract_slug=state["contract_slug"])
             except Exception as exc:
-                logger.error("publish_failed", platform=platform, error=str(exc))
-
-    return {**state, "status": "published"}
+                logger.error("draft_approval_failed", error=str(exc))
+        return {**state, "status": "pending_approval"}

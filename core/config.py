@@ -82,8 +82,9 @@ class Settings(BaseSettings):
 
     # Agent control
     agent_paused: bool = False
+    agent_auto: bool = True  # auto mode — posts without approval. False = drafts sent to Telegram first
     agent_name: str = "astrlboy"
-    agent_handle: str = "@astrlboy"
+    agent_handle: str = "@astrlboy_"
     log_level: str = "INFO"
 
 

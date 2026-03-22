@@ -1,9 +1,9 @@
 """
-One-time script to get X/Twitter access tokens for @astrlboy__ via 3-legged OAuth.
+One-time script to get X/Twitter access tokens for @astrlboy_ via 3-legged OAuth.
 
 Run this once:
   1. Enter your app's Consumer Key and Secret when prompted
-  2. Open the URL in a browser where @astrlboy__ is logged in
+  2. Open the URL in a browser where @astrlboy_ is logged in
   3. Authorize the app
   4. Enter the PIN shown
   5. Copy the access token and secret into your .env
@@ -28,7 +28,7 @@ def main() -> None:
     )
 
     auth_url = oauth1_handler.get_authorization_url()
-    print(f"\n1. Log into @astrlboy__ in your browser")
+    print(f"\n1. Log into @astrlboy_ in your browser")
     print(f"2. Visit this URL:\n\n   {auth_url}\n")
     print(f"3. Authorize the app and copy the PIN\n")
 
