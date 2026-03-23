@@ -207,12 +207,63 @@ async def run_mentions_job() -> None:
             if not await skill_registry.is_available("post_x"):
                 return
 
+            from sqlalchemy import select
+
+            from db.base import async_session_factory
+            from db.models.interactions import Interaction
+
             mentions_skill = await skill_registry.get("get_mentions")
             post_skill = await skill_registry.get("post_x")
             _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
             # Get our user ID for detecting replies to our own tweets
             our_user_id = await get_x_user_id()
+
+            async def _get_interaction_history(username: str) -> str:
+                """Fetch past X interactions with this user for context.
+
+                Returns a summary string of previous engagements so the agent
+                knows if it's talked to this person before and what about.
+                """
+                try:
+                    async with async_session_factory() as hist_session:
+                        result = await hist_session.execute(
+                            select(Interaction)
+                            .where(Interaction.platform == "x")
+                            .where(Interaction.thread_url.ilike(f"%{username}%"))
+                            .where(Interaction.status == "posted")
+                            .order_by(Interaction.posted_at.desc())
+                            .limit(5)
+                        )
+                        past = result.scalars().all()
+                        if not past:
+                            return ""
+
+                        lines = [f"INTERACTION HISTORY with @{username} ({len(past)} previous):"]
+                        for p in past:
+                            date = p.posted_at.strftime("%Y-%m-%d") if p.posted_at else "unknown"
+                            lines.append(f"- [{date}] {p.draft[:100]}")
+                        return "\n".join(lines)
+                except Exception:
+                    return ""
+
+            async def _log_interaction(
+                username: str, tweet_id: str, reply_text: str, status: str = "posted"
+            ) -> None:
+                """Log an X interaction to the interactions table."""
+                try:
+                    async with async_session_factory() as log_session:
+                        interaction = Interaction(
+                            platform="x",
+                            thread_url=f"https://x.com/{username}/status/{tweet_id}",
+                            thread_context=username,
+                            draft=reply_text,
+                            status=status,
+                        )
+                        log_session.add(interaction)
+                        await log_session.commit()
+                except Exception as log_exc:
+                    logger.warning("interaction_log_failed", error=str(log_exc))
 
             # Fetch since_id from Redis to skip already-processed mentions
             since_id = None
@@ -253,6 +304,10 @@ async def run_mentions_job() -> None:
             # Process own-tweet replies first — always reply, bypass cap
             for m in own_tweet_replies:
                 try:
+                    # Check if we've talked to this person before
+                    history = await _get_interaction_history(m["author_username"])
+                    history_note = f"\n\n{history}" if history else ""
+
                     response = await _client.messages.create(
                         model="claude-haiku-4-5",
                         max_tokens=280,
@@ -260,6 +315,7 @@ async def run_mentions_job() -> None:
                             "You are astrlboy, an autonomous AI agent on X. Someone replied to YOUR tweet. "
                             "This is a conversation on your own content — engage genuinely. "
                             "Be sharp, concise, human. Max 280 chars."
+                            f"{history_note}"
                         ),
                         messages=[{"role": "user", "content": f"@{m['author_username']} replied to your tweet: {m['text']}"}],
                     )
@@ -271,6 +327,7 @@ async def run_mentions_job() -> None:
                             reply_to_id=m["id"],
                             bypass_cap=True,
                         )
+                        await _log_interaction(m["author_username"], m["id"], reply_text)
                         logger.info(
                             "own_tweet_reply_posted",
                             mention_id=m["id"],
@@ -285,6 +342,7 @@ async def run_mentions_job() -> None:
                                 contract_slug="astrlboy",
                                 title=f"[own_thread] Reply to @{m['author_username']}",
                             )
+                            await _log_interaction(m["author_username"], m["id"], reply_text, status="pending")
                 except Exception as exc:
                     logger.warning("own_tweet_reply_failed", mention_id=m["id"], error=str(exc))
 
@@ -343,6 +401,16 @@ async def run_mentions_job() -> None:
                         reply_text = dismiss_resp.content[0].text.strip()[:280]
 
                     else:
+                        # Check interaction history for relevant mentions
+                        history = await _get_interaction_history(m["author_username"])
+                        history_note = ""
+                        if history:
+                            history_note = (
+                                f"\n\n{history}\n"
+                                "Use this context to be more personal — reference past interactions "
+                                "if natural, recognize returning people."
+                            )
+
                         response = await _client.messages.create(
                             model="claude-haiku-4-5",
                             max_tokens=280,
@@ -351,6 +419,7 @@ async def run_mentions_job() -> None:
                                 "contractor in AI, Web3, and tech. You hold real contracts and deliver real work.\n"
                                 "Reply to this mention. Be sharp, concise, human. Max 280 chars.\n"
                                 "Have opinions. Don't hedge. Don't sound like AI."
+                                f"{history_note}"
                             ),
                             messages=[{"role": "user", "content": f"@{m['author_username']} said: {m['text']}"}],
                         )
@@ -359,6 +428,7 @@ async def run_mentions_job() -> None:
                     # Step 3: Post or queue for approval
                     if settings.agent_auto:
                         await post_skill.execute(text=reply_text, reply_to_id=m["id"])
+                        await _log_interaction(m["author_username"], m["id"], reply_text)
                         logger.info(
                             "mention_replied",
                             mention_id=m["id"],
@@ -374,6 +444,7 @@ async def run_mentions_job() -> None:
                                 contract_slug="astrlboy",
                                 title=f"[{category}] Reply to @{m['author_username']}",
                             )
+                            await _log_interaction(m["author_username"], m["id"], reply_text, status="pending")
                 except Exception as exc:
                     logger.warning("mention_reply_failed", mention_id=m["id"], error=str(exc))
 
@@ -540,6 +611,275 @@ async def run_follow_back_job() -> None:
             logger.error("follow_back_job_failed", error=str(exc))
 
 
+# Email processing — Daily 11:00 WAT
+# Reads unread inbound emails, classifies them, and takes action:
+# - Job application replies → draft follow-up or escalate to Wave
+# - General inquiries → auto-reply or escalate depending on content
+# - Spam/newsletters → mark read and ignore
+EMAIL_CLASSIFY_PROMPT = """You are classifying an inbound email to agent@astrlboy.xyz.
+astrlboy is an autonomous AI agent that works as a freelance contractor.
+
+Classify this email into one of these categories:
+- "application_reply": A reply to a job application astrlboy sent. Could be a rejection, interview request, follow-up question, etc.
+- "business_inquiry": Someone reaching out about potential work, partnership, or collaboration.
+- "follow_up_needed": An email that requires a specific response — a question, request for info, scheduling, etc.
+- "newsletter": Automated newsletter, marketing email, or notification. No action needed.
+- "spam": Spam, scam, or irrelevant. No action needed.
+
+Also determine what action to take:
+- "auto_reply": astrlboy can handle this with a professional reply.
+- "escalate": Needs Wave's attention — interview scheduling, money discussion, or anything high-stakes.
+- "ignore": No action needed (spam, newsletters).
+
+Respond with ONLY a JSON object:
+{"category": "<category>", "action": "<auto_reply|escalate|ignore>", "reason": "<one sentence>", "suggested_reply": "<draft reply if action is auto_reply, otherwise empty string>"}"""
+
+
+async def run_email_processing_job() -> None:
+    """Process unread inbound emails — classify and take action.
+
+    For each unread email:
+    1. Load conversation history (past emails with this contact)
+    2. Classify the email using Claude
+    3. Take action: auto-reply, escalate to Wave, or mark as handled
+
+    This job gives astrlboy the ability to actually respond to incoming mail
+    instead of just storing it and hoping Wave checks Telegram.
+    """
+    if await agent_service.is_paused():
+        return
+    async with redis_lock("email_processing_job") as acquired:
+        if not acquired:
+            return
+        try:
+            import json
+
+            from sqlalchemy import select
+
+            from core.ai import create_message
+            from core.config import settings
+            from db.base import async_session_factory
+            from db.models.inbound_emails import InboundEmail
+            from db.models.outbound_emails import OutboundEmail
+            from db.models.job_applications import JobApplication
+            from skills.registry import skill_registry
+
+            if not await skill_registry.is_available("send_email"):
+                logger.info("email_processing_skipped", reason="send_email skill not available")
+                return
+
+            send_skill = await skill_registry.get("send_email")
+
+            async with async_session_factory() as session:
+                # Fetch unread inbound emails
+                result = await session.execute(
+                    select(InboundEmail)
+                    .where(InboundEmail.is_read == False)  # noqa: E712
+                    .order_by(InboundEmail.received_at.asc())
+                    .limit(10)
+                )
+                unread = result.scalars().all()
+
+                if not unread:
+                    return
+
+                logger.info("email_processing_start", count=len(unread))
+
+                for email in unread:
+                    try:
+                        # Build conversation context — what we've sent to/received from this contact
+                        context_parts = []
+
+                        # Our previous outbound to this contact
+                        outbound_result = await session.execute(
+                            select(OutboundEmail)
+                            .where(OutboundEmail.to_email == email.from_email)
+                            .order_by(OutboundEmail.sent_at.desc())
+                            .limit(5)
+                        )
+                        for sent in outbound_result.scalars().all():
+                            context_parts.append(
+                                f"[SENT {sent.sent_at.strftime('%Y-%m-%d')}] "
+                                f"Subject: {sent.subject}\n{sent.text_body[:300]}"
+                            )
+
+                        # Previous inbound from this contact
+                        inbound_result = await session.execute(
+                            select(InboundEmail)
+                            .where(InboundEmail.from_email == email.from_email)
+                            .where(InboundEmail.id != email.id)
+                            .order_by(InboundEmail.received_at.desc())
+                            .limit(5)
+                        )
+                        for prev in inbound_result.scalars().all():
+                            body = prev.text_body or prev.html_body or ""
+                            context_parts.append(
+                                f"[RECEIVED {prev.received_at.strftime('%Y-%m-%d')}] "
+                                f"Subject: {prev.subject}\n{body[:300]}"
+                            )
+
+                        # Check if this contact matches a job application
+                        app_result = await session.execute(
+                            select(JobApplication)
+                            .where(JobApplication.email_sent_to == email.from_email)
+                            .order_by(JobApplication.sent_at.desc())
+                            .limit(1)
+                        )
+                        matched_app = app_result.scalar_one_or_none()
+                        app_context = ""
+                        if matched_app:
+                            app_context = (
+                                f"\n\nMATCHED JOB APPLICATION:\n"
+                                f"Role: {matched_app.role}\n"
+                                f"Company: {matched_app.company}\n"
+                                f"Status: {matched_app.status}\n"
+                                f"Applied: {matched_app.sent_at.strftime('%Y-%m-%d')}"
+                            )
+
+                        conversation_context = "\n---\n".join(context_parts) if context_parts else "(No prior conversation history)"
+
+                        email_body = email.text_body or email.html_body or "(empty)"
+
+                        # Classify the email
+                        classify_resp = await create_message(
+                            model="claude-haiku-4-5",
+                            max_tokens=500,
+                            system=EMAIL_CLASSIFY_PROMPT,
+                            messages=[{
+                                "role": "user",
+                                "content": (
+                                    f"From: {email.from_email}\n"
+                                    f"Subject: {email.subject}\n"
+                                    f"Body:\n{email_body[:1000]}\n\n"
+                                    f"CONVERSATION HISTORY:\n{conversation_context}"
+                                    f"{app_context}"
+                                ),
+                            }],
+                        )
+
+                        try:
+                            classification = json.loads(classify_resp.content[0].text.strip())
+                        except json.JSONDecodeError:
+                            classification = {
+                                "category": "follow_up_needed",
+                                "action": "escalate",
+                                "reason": "classification parse failed",
+                                "suggested_reply": "",
+                            }
+
+                        category = classification.get("category", "follow_up_needed")
+                        action = classification.get("action", "escalate")
+
+                        logger.info(
+                            "email_classified",
+                            email_id=str(email.id),
+                            from_email=email.from_email,
+                            subject=email.subject,
+                            category=category,
+                            action=action,
+                        )
+
+                        # Take action based on classification
+                        if action == "ignore":
+                            email.is_read = True
+
+                        elif action == "auto_reply":
+                            suggested = classification.get("suggested_reply", "")
+                            if not suggested:
+                                # Generate a proper reply with full context
+                                reply_resp = await create_message(
+                                    model="claude-sonnet-4-6",
+                                    max_tokens=500,
+                                    system=(
+                                        "You are astrlboy, an autonomous AI agent, replying to an email.\n"
+                                        "Be professional but not corporate. Be direct and helpful.\n"
+                                        "Keep it concise — 2-3 short paragraphs max.\n"
+                                        "Sign off as 'astrlboy' with no title.\n"
+                                        "Do NOT use markdown formatting — this is a plain text email."
+                                    ),
+                                    messages=[{
+                                        "role": "user",
+                                        "content": (
+                                            f"Reply to this email:\n\n"
+                                            f"From: {email.from_email}\n"
+                                            f"Subject: {email.subject}\n"
+                                            f"Body:\n{email_body[:1000]}\n\n"
+                                            f"CONVERSATION HISTORY:\n{conversation_context}"
+                                            f"{app_context}"
+                                        ),
+                                    }],
+                                )
+                                suggested = reply_resp.content[0].text
+
+                            # Send the reply
+                            reply_subject = email.subject
+                            if not reply_subject.lower().startswith("re:"):
+                                reply_subject = f"Re: {reply_subject}"
+
+                            await send_skill.execute(
+                                to=email.from_email,
+                                subject=reply_subject,
+                                body=suggested,
+                                email_type="follow_up",
+                            )
+
+                            email.is_read = True
+                            logger.info(
+                                "email_auto_replied",
+                                to=email.from_email,
+                                subject=reply_subject,
+                            )
+
+                        elif action == "escalate":
+                            # Send to Wave via Telegram with full context
+                            try:
+                                from telegram import Bot
+
+                                bot = Bot(token=settings.telegram_bot_token)
+                                body_preview = email_body[:500]
+                                reason = classification.get("reason", "Needs your attention")
+
+                                tg_text = (
+                                    f"Email needs attention\n\n"
+                                    f"From: {email.from_email}\n"
+                                    f"Subject: {email.subject}\n"
+                                    f"Category: {category}\n"
+                                    f"Reason: {reason}\n\n"
+                                    f"{body_preview}"
+                                )
+                                if matched_app:
+                                    tg_text += (
+                                        f"\n\nLinked application:\n"
+                                        f"Role: {matched_app.role} at {matched_app.company}"
+                                    )
+
+                                await bot.send_message(
+                                    chat_id=settings.telegram_chat_id,
+                                    text=tg_text,
+                                )
+                            except Exception as tg_exc:
+                                logger.warning("email_escalation_telegram_failed", error=str(tg_exc))
+
+                            # Don't mark as read — Wave will handle it
+                            # But mark it read to prevent re-processing; the Telegram
+                            # message is the escalation signal
+                            email.is_read = True
+
+                    except Exception as exc:
+                        logger.warning(
+                            "email_processing_single_failed",
+                            email_id=str(email.id),
+                            error=str(exc),
+                        )
+
+                await session.commit()
+
+            logger.info("email_processing_complete", processed=len(unread))
+
+        except Exception as exc:
+            logger.error("email_processing_job_failed", error=str(exc))
+
+
 # Keyword ranking tracking — Weekly Wed 07:00 WAT
 async def run_keyword_tracking_job() -> None:
     """Track keyword rankings for all active contracts."""
@@ -642,6 +982,40 @@ async def run_performance_job() -> None:
             logger.error("performance_job_failed", error=str(exc))
 
 
+# Memory compression — Sun 18:00 WAT
+# Distills the week's raw interactions into long-term mem0 memories.
+async def run_compression_job() -> None:
+    """Compress weekly interactions into long-term memories for all active contracts."""
+    if await agent_service.is_paused():
+        return
+    async with redis_lock("compression_job") as acquired:
+        if not acquired:
+            return
+        try:
+            from memory.compression import compress_weekly_memories
+
+            contracts = await contracts_service.get_active_contracts()
+            for contract in contracts:
+                try:
+                    stored = await compress_weekly_memories(
+                        contract_id=contract.id,
+                        contract_slug=contract.client_slug,
+                    )
+                    logger.info(
+                        "compression_completed",
+                        slug=contract.client_slug,
+                        learnings=stored,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "compression_failed",
+                        slug=contract.client_slug,
+                        error=str(exc),
+                    )
+        except Exception as exc:
+            logger.error("compression_job_failed", error=str(exc))
+
+
 def create_scheduler() -> AsyncIOScheduler:
     """Create and configure the APScheduler instance with all jobs.
 
@@ -715,6 +1089,13 @@ def create_scheduler() -> AsyncIOScheduler:
     )
 
     scheduler.add_job(
+        run_email_processing_job,
+        CronTrigger(hour=11, minute=0, timezone=tz),
+        id="email_processing_job",
+        name="Email processing — Daily 11:00 WAT",
+    )
+
+    scheduler.add_job(
         run_keyword_tracking_job,
         CronTrigger(day_of_week="wed", hour=7, minute=0, timezone=tz),
         id="keyword_tracking_job",
@@ -733,6 +1114,13 @@ def create_scheduler() -> AsyncIOScheduler:
         CronTrigger(hour=20, minute=0, timezone=tz),
         id="performance_job",
         name="Performance metrics collection — Daily 20:00 WAT",
+    )
+
+    scheduler.add_job(
+        run_compression_job,
+        CronTrigger(day_of_week="sun", hour=18, minute=30, timezone=tz),
+        id="compression_job",
+        name="Memory compression — Sun 18:30 WAT",
     )
 
     return scheduler

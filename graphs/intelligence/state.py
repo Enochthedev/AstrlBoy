@@ -13,6 +13,10 @@ class IntelligenceState(TypedDict, total=False):
     contract_slug: str
     contract_meta: dict
 
+    # Memory context — injected before first node runs
+    context: dict  # from build_intelligence_context
+    long_term_memories: list[str]  # from mem0 search
+
     # Competitor analysis
     competitor_snapshots: list[dict]
     diff_from_last_week: str

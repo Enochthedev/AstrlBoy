@@ -36,6 +36,7 @@ from skills.builtin.follow_x import FollowXSkill
 from skills.builtin.generate_hashtag_strategy import GenerateHashtagStrategySkill
 from skills.builtin.get_mentions import GetMentionsSkill
 from skills.builtin.get_timeline import GetTimelineSkill
+from skills.builtin.list_emails import ListEmailsSkill
 from skills.builtin.lookup_x_user import LookupXUserSkill
 from skills.builtin.monitor_competitor import MonitorCompetitorSkill
 from skills.builtin.osint_lookup import OsintLookupSkill
@@ -49,6 +50,7 @@ from skills.builtin.scrape import ScrapeSkill
 from skills.builtin.search import SearchSkill
 from skills.builtin.send_email import SendEmailSkill
 from skills.builtin.serp import SerpSkill
+from skills.builtin.thread_x import ThreadXSkill
 from skills.builtin.track_keyword_rankings import TrackKeywordRankingsSkill
 from skills.builtin.trend_stream import TrendStreamSkill
 from skills.builtin.unfollow_x import UnfollowXSkill
@@ -159,7 +161,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         PostXSkill, PostLinkedInSkill, ReplyXSkill,
         FollowXSkill, UnfollowXSkill, FollowBackXSkill,
         # Email
-        SendEmailSkill, ReadEmailSkill,
+        SendEmailSkill, ReadEmailSkill, ListEmailsSkill,
         # Growth — X strategy + audience
         FindRelevantAccountsSkill, AnalyzeTrendingContentSkill,
         TrackKeywordRankingsSkill, GenerateHashtagStrategySkill,
@@ -169,6 +171,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         OsintLookupSkill, LookupXUserSkill,
         # Applications — job hunting
         ScanJobBoardsSkill, ApplyToUrlSkill,
+        # X — threading
+        ThreadXSkill,
         # Stream + approval
         TrendStreamSkill, DraftApprovalSkill,
         GetMentionsSkill, GetTimelineSkill,

@@ -14,6 +14,8 @@ import httpx
 from core.config import settings
 from core.exceptions import SkillExecutionError
 from core.logging import get_logger
+from db.base import async_session_factory
+from db.models.outbound_emails import OutboundEmail
 from skills.base import BaseTool
 
 logger = get_logger("skills.send_email")
@@ -35,6 +37,8 @@ class SendEmailSkill(BaseTool):
         body: str,
         from_addr: str | None = None,
         html: bool = False,
+        email_type: str = "general",
+        contract_slug: str | None = None,
         **kwargs: Any,
     ) -> dict[str, str]:
         """Send an email via Resend HTTP API.
@@ -45,6 +49,9 @@ class SendEmailSkill(BaseTool):
             body: Email body (plain text or HTML).
             from_addr: Sender address. Defaults to agent_email from config.
             html: If True, body is treated as HTML.
+            email_type: Category for tracking — 'application', 'briefing',
+                'follow_up', or 'general'.
+            contract_slug: Optional contract this email relates to.
 
         Returns:
             Dict with 'to', 'subject', 'status', and 'resend_id'.
@@ -58,15 +65,29 @@ class SendEmailSkill(BaseTool):
         if not api_key:
             raise SkillExecutionError("RESEND_API_KEY not configured")
 
+        # Auto-render plain text into HTML template for professional formatting.
+        # If the caller already provides HTML, use it as-is.
+        html_body = ""
+        if html:
+            html_body = body
+        else:
+            from core.email_templates import render_email
+
+            html_body = render_email(
+                email_type,
+                subject=subject,
+                body=body,
+                contract_slug=contract_slug or "",
+            )
+
         payload: dict[str, Any] = {
             "from": sender,
             "to": [to],
             "subject": subject,
+            "html": html_body,
+            # Include plain text fallback for clients that don't render HTML
+            "text": body if not html else "",
         }
-        if html:
-            payload["html"] = body
-        else:
-            payload["text"] = body
 
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -83,6 +104,26 @@ class SendEmailSkill(BaseTool):
 
             resend_id = data.get("id", "")
             logger.info("email_sent", to=to, subject=subject, resend_id=resend_id)
+
+            # Persist to outbound_emails so the agent can see what it's sent
+            try:
+                async with async_session_factory() as session:
+                    outbound = OutboundEmail(
+                        resend_id=resend_id or None,
+                        from_email=sender,
+                        to_email=to,
+                        subject=subject,
+                        text_body=body,
+                        html_body=html_body,
+                        email_type=email_type,
+                        contract_slug=contract_slug,
+                    )
+                    session.add(outbound)
+                    await session.commit()
+            except Exception as db_exc:
+                # Non-fatal — email was already sent, just log the tracking failure
+                logger.warning("outbound_email_store_failed", error=str(db_exc))
+
             return {"to": to, "subject": subject, "status": "sent", "resend_id": resend_id}
 
         except httpx.HTTPStatusError as exc:

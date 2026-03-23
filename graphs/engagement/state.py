@@ -14,6 +14,10 @@ class EngagementState(TypedDict, total=False):
     contract_meta: dict
     platform: str
 
+    # Memory context — injected before first node runs
+    context: dict  # from build_engagement_context
+    long_term_memories: list[str]  # from mem0 search
+
     # Thread discovery
     candidate_threads: list[dict]
     scored_threads: list[dict]

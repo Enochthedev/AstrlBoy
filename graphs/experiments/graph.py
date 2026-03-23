@@ -20,8 +20,8 @@ logger = get_logger("graphs.experiments")
 class ExperimentsGraph(BaseGraph):
     """Growth experiment lifecycle pipeline."""
 
-    def build(self) -> StateGraph:
-        """Build the experiments graph."""
+    async def build(self) -> Any:
+        """Build the experiments graph with checkpointer."""
         graph = StateGraph(ExperimentState)
 
         graph.add_node("generate_ideas", generate_ideas)
@@ -33,11 +33,17 @@ class ExperimentsGraph(BaseGraph):
         graph.add_edge("select_experiment", "save_experiment")
         graph.add_edge("save_experiment", END)
 
-        return graph.compile()
+        try:
+            from db.checkpointer import get_checkpointer
+            checkpointer = await get_checkpointer()
+            return graph.compile(checkpointer=checkpointer)
+        except Exception as exc:
+            logger.warning("checkpointer_unavailable", error=str(exc))
+            return graph.compile()
 
     async def run(self, contract: Contract, **kwargs: Any) -> dict:
         """Run the experiments graph for a contract."""
-        compiled = self.build()
+        compiled = await self.build()
         initial_state: ExperimentState = {
             "contract_id": contract.id,
             "contract_slug": contract.client_slug,

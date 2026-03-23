@@ -26,8 +26,10 @@ class BaseGraph(ABC):
     """
 
     @abstractmethod
-    def build(self) -> StateGraph:
+    async def build(self) -> Any:
         """Build and return the compiled graph.
+
+        Async to support checkpointer initialization.
 
         Returns:
             A compiled LangGraph StateGraph ready to invoke.

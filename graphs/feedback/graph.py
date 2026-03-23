@@ -20,8 +20,8 @@ logger = get_logger("graphs.feedback")
 class FeedbackGraph(BaseGraph):
     """Product feedback pipeline."""
 
-    def build(self) -> StateGraph:
-        """Build the feedback graph."""
+    async def build(self) -> Any:
+        """Build the feedback graph with checkpointer."""
         graph = StateGraph(FeedbackState)
 
         graph.add_node("gather_observations", gather_observations)
@@ -33,11 +33,17 @@ class FeedbackGraph(BaseGraph):
         graph.add_edge("generate_feature_requests", "submit_requests")
         graph.add_edge("submit_requests", END)
 
-        return graph.compile()
+        try:
+            from db.checkpointer import get_checkpointer
+            checkpointer = await get_checkpointer()
+            return graph.compile(checkpointer=checkpointer)
+        except Exception as exc:
+            logger.warning("checkpointer_unavailable", error=str(exc))
+            return graph.compile()
 
     async def run(self, contract: Contract, **kwargs: Any) -> dict:
         """Run the feedback graph for a contract."""
-        compiled = self.build()
+        compiled = await self.build()
         initial_state: FeedbackState = {
             "contract_id": contract.id,
             "contract_slug": contract.client_slug,

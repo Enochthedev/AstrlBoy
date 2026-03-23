@@ -17,6 +17,10 @@ class ContentState(TypedDict, total=False):
     contract_meta: dict
     content_type: str
 
+    # Memory context — injected before first node runs
+    context: dict  # from build_content_context
+    long_term_memories: list[str]  # from mem0 search
+
     # Research phase
     research: str
     trend_signals: list[dict]

@@ -166,7 +166,33 @@ async def inbound_email(request: Request) -> dict:
     except Exception as exc:
         logger.error("inbound_email_store_failed", error=str(exc))
 
-    # Notify Wave via Telegram
+    # Build conversation context — how many emails have we exchanged with this person?
+    conversation_count = 0
+    try:
+        from db.models.outbound_emails import OutboundEmail
+
+        async with async_session_factory() as ctx_session:
+            # Count our outbound emails to this contact
+            from sqlalchemy import func as sqla_func
+
+            outbound_count_result = await ctx_session.execute(
+                select(sqla_func.count(OutboundEmail.id))
+                .where(OutboundEmail.to_email == from_email)
+            )
+            outbound_count = outbound_count_result.scalar() or 0
+
+            # Count inbound from this contact (including the one we just stored)
+            inbound_count_result = await ctx_session.execute(
+                select(sqla_func.count(InboundEmail.id))
+                .where(InboundEmail.from_email == from_email)
+            )
+            inbound_count = inbound_count_result.scalar() or 0
+
+            conversation_count = outbound_count + inbound_count
+    except Exception:
+        pass
+
+    # Notify Wave via Telegram with conversation context
     try:
         from telegram import Bot
 
@@ -175,20 +201,26 @@ async def inbound_email(request: Request) -> dict:
         # Show body preview — prefer plain text, fall back to noting HTML-only
         body_preview = text_body[:500] if text_body else "(HTML-only email — check Resend dashboard)"
 
+        conv_note = ""
+        if conversation_count > 1:
+            conv_note = f"\nConversation: {conversation_count} emails exchanged\n"
+
         if matched_application:
             text = (
                 f"Reply received — job application\n\n"
                 f"From: {from_email}\n"
                 f"Company: {matched_application.company}\n"
                 f"Role: {matched_application.role}\n"
-                f"Subject: {subject}\n\n"
+                f"Subject: {subject}\n"
+                f"{conv_note}\n"
                 f"{body_preview}"
             )
         else:
             text = (
                 f"New inbound email\n\n"
                 f"From: {from_email}\n"
-                f"Subject: {subject}\n\n"
+                f"Subject: {subject}\n"
+                f"{conv_note}\n"
                 f"{body_preview}"
             )
 

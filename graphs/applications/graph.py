@@ -26,8 +26,8 @@ logger = get_logger("graphs.applications")
 class ApplicationsGraph(BaseGraph):
     """Job application pipeline with warm outreach before cold application."""
 
-    def build(self) -> StateGraph:
-        """Build the applications graph.
+    async def build(self) -> Any:
+        """Build the applications graph with checkpointer.
 
         Flow: scan → score → warm outreach → apply
         The warm outreach step engages with the hiring company on X
@@ -46,11 +46,17 @@ class ApplicationsGraph(BaseGraph):
         graph.add_edge("warm_outreach", "draft_application")
         graph.add_edge("draft_application", END)
 
-        return graph.compile()
+        try:
+            from db.checkpointer import get_checkpointer
+            checkpointer = await get_checkpointer()
+            return graph.compile(checkpointer=checkpointer)
+        except Exception as exc:
+            logger.warning("checkpointer_unavailable", error=str(exc))
+            return graph.compile()
 
     async def run(self, contract: Contract | None = None, **kwargs: Any) -> dict:
         """Run the applications graph. This is agent-level, not per-contract."""
-        compiled = self.build()
+        compiled = await self.build()
         initial_state: ApplicationState = {}
 
         logger.info("applications_graph_started")

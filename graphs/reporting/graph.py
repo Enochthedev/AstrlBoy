@@ -21,8 +21,8 @@ logger = get_logger("graphs.reporting")
 class ReportingGraph(BaseGraph):
     """Weekly intelligence briefing pipeline."""
 
-    def build(self) -> StateGraph:
-        """Build the reporting graph."""
+    async def build(self) -> Any:
+        """Build the reporting graph with checkpointer."""
         graph = StateGraph(ReportingState)
 
         graph.add_node("aggregate_intelligence", aggregate_intelligence)
@@ -36,11 +36,17 @@ class ReportingGraph(BaseGraph):
         graph.add_edge("deliver", "store")
         graph.add_edge("store", END)
 
-        return graph.compile()
+        try:
+            from db.checkpointer import get_checkpointer
+            checkpointer = await get_checkpointer()
+            return graph.compile(checkpointer=checkpointer)
+        except Exception as exc:
+            logger.warning("checkpointer_unavailable", error=str(exc))
+            return graph.compile()
 
     async def run(self, contract: Contract, **kwargs: Any) -> dict:
         """Run the reporting graph for a contract."""
-        compiled = self.build()
+        compiled = await self.build()
         initial_state: ReportingState = {
             "contract_id": contract.id,
             "contract_slug": contract.client_slug,

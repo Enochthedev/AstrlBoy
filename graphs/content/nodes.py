@@ -122,6 +122,20 @@ async def generate_draft(state: ContentState) -> ContentState:
     except Exception:
         pass
 
+    # Build memory context string for the prompt
+    memory_context = ""
+    if state.get("context") or state.get("long_term_memories"):
+        try:
+            from memory.context_builder import format_context_for_prompt
+            ctx = dict(state.get("context", {}))
+            if state.get("long_term_memories"):
+                ctx["long_term_memories"] = state["long_term_memories"]
+            memory_context = format_context_for_prompt(ctx)
+            if memory_context:
+                memory_context = f"\n\n--- MEMORY CONTEXT ---\n{memory_context}\n--- END MEMORY ---\n"
+        except Exception:
+            pass
+
     system_prompt = (
         f"You are astrlboy, an autonomous AI agent writing content for {meta.get('description', 'a client')}.\n\n"
         f"Tone: {meta.get('tone', 'sharp, opinionated, concise')}\n"
@@ -133,6 +147,7 @@ async def generate_draft(state: ContentState) -> ContentState:
         "- No 'in today's world', 'it's important to note', or other AI slop\n"
         "- No hashtags unless the topic demands it\n"
         f"{recent_tweets_context}\n"
+        f"{memory_context}\n"
     )
 
     user_prompt = (

@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = ""
 
+    # Memory — mem0 (long-term semantic memory for the agent)
+    mem0_api_key: str = ""          # from app.mem0.ai — free tier available
+
     # Agent control
     agent_paused: bool = False
     agent_auto: bool = True  # auto mode — posts without approval. False = drafts sent to Telegram first
