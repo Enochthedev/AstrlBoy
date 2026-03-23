@@ -80,6 +80,7 @@ class ApplyToUrlSkill(BaseTool):
         contact_email = extracted.get("contact_email", "")
         fit_score = extracted.get("fit_score", 0)
         requirements = extracted.get("requirements", "")
+        application_steps = extracted.get("application_steps", [])
 
         # Step 3: Check fit score — don't waste effort on poor-fit roles
         if fit_score < _MIN_FIT_SCORE:
@@ -115,14 +116,27 @@ class ApplyToUrlSkill(BaseTool):
         cover_note = await self._draft_cover_note(role, company, requirements, posting_markdown)
         raw_io["steps"].append({"step": "draft", "cover_note": cover_note})
 
+        # Step 4b: Handle multi-step applications (e.g. "post a tweet, then interview")
+        # Execute deliverables the agent can do autonomously, escalate the rest
+        deliverables_completed: list[dict] = []
+        if application_steps:
+            deliverables_completed = await self._execute_application_steps(
+                application_steps, role, company, posting_markdown
+            )
+            raw_io["steps"].append({"step": "multi_step", "deliverables": deliverables_completed})
+
         # Step 5: Route based on application method
         status: str
         if application_method == "email" and contact_email:
             status = await self._send_email_application(contact_email, role, company, cover_note)
+        elif application_method == "multi_step":
+            # Multi-step: we've done what we can, escalate the rest to Wave
+            status = await self._escalate_multi_step(
+                url, role, company, cover_note, application_steps, deliverables_completed
+            )
         elif application_method in ("form", "portal"):
             status = await self._escalate_for_human(url, role, company, cover_note, application_method)
         else:
-            # Unknown method — escalate so Wave can decide
             status = await self._escalate_for_human(url, role, company, cover_note, "unknown")
 
         raw_io["steps"].append({"step": "route", "method": application_method, "status": status})
@@ -239,9 +253,17 @@ class ApplyToUrlSkill(BaseTool):
                         "- role (str): job title\n"
                         "- company (str): company name\n"
                         "- requirements (str): key requirements, max 500 chars\n"
-                        "- application_method (str): one of 'email', 'form', 'portal', 'unknown'\n"
+                        "- application_method (str): one of 'email', 'form', 'portal', 'multi_step', 'unknown'\n"
                         "- contact_email (str): email to apply to, or empty string if none found\n"
-                        "- fit_score (int): 0-10 how well astrlboy fits this role"
+                        "- fit_score (int): 0-10 how well astrlboy fits this role\n"
+                        "- application_steps (list[dict]): ordered steps to apply. Each step has:\n"
+                        "    - step_number (int)\n"
+                        "    - description (str): what the step requires\n"
+                        "    - type (str): one of 'public_deliverable', 'email', 'form', 'interview', 'other'\n"
+                        "    - deliverable_prompt (str): if type is 'public_deliverable', the exact prompt/topic\n"
+                        "    - platform (str): if type is 'public_deliverable', where to post (e.g. 'x', 'linkedin')\n"
+                        "  If the application is a simple email, just return one step.\n"
+                        "  If the posting has a multi-step process, return ALL steps in order."
                     ),
                 }],
             )
@@ -395,6 +417,212 @@ class ApplyToUrlSkill(BaseTool):
             logger.error("escalation_failed", url=url, error=str(exc))
 
         return "needs_human"
+
+    async def _execute_application_steps(
+        self,
+        steps: list[dict],
+        role: str,
+        company: str,
+        posting_markdown: str,
+    ) -> list[dict]:
+        """Execute application steps that the agent can handle autonomously.
+
+        For 'public_deliverable' steps (e.g. "write a tweet about X"), the agent
+        drafts and posts the content. For steps requiring human action (interviews,
+        forms), they're flagged for escalation.
+
+        Args:
+            steps: List of application step dicts from extraction.
+            role: Job title.
+            company: Company name.
+            posting_markdown: Full posting content for context.
+
+        Returns:
+            List of completed deliverable dicts with status and output.
+        """
+        completed: list[dict] = []
+
+        for step in steps:
+            step_type = step.get("type", "other")
+            description = step.get("description", "")
+
+            if step_type == "public_deliverable":
+                # The agent can do this — draft and post content
+                prompt = step.get("deliverable_prompt", description)
+                platform = step.get("platform", "x")
+
+                try:
+                    # Draft the deliverable content
+                    response = await self._anthropic.messages.create(
+                        model="claude-sonnet-4-6",
+                        max_tokens=1000,
+                        system=(
+                            f"You are astrlboy, an autonomous AI agent applying for a role at {company}.\n"
+                            f"Role: {role}\n\n"
+                            "You need to write a public deliverable as part of the application process.\n"
+                            "Write it as a genuine, thoughtful piece — not a cover letter.\n"
+                            "Be sharp, opinionated, and show real expertise.\n"
+                            "If this is for X/Twitter, keep it under 280 chars per tweet.\n"
+                            "If it's a thread, separate tweets with ---"
+                        ),
+                        messages=[{
+                            "role": "user",
+                            "content": (
+                                f"Application deliverable prompt: {prompt}\n\n"
+                                f"Context from the job posting:\n{posting_markdown[:4000]}\n\n"
+                                "Write the deliverable now."
+                            ),
+                        }],
+                    )
+
+                    content = response.content[0].text.strip()
+
+                    # Post it if platform is X and the skill is available
+                    posted = False
+                    tweet_id = None
+                    if platform == "x" and await skill_registry.is_available("post_x"):
+                        post_skill = await skill_registry.get("post_x")
+                        # Handle thread (split by ---) or single tweet
+                        tweets = [t.strip() for t in content.split("---") if t.strip()]
+                        if not tweets:
+                            tweets = [content[:280]]
+
+                        reply_to = None
+                        for tweet_text in tweets:
+                            try:
+                                result = await post_skill.execute(
+                                    text=tweet_text[:280],
+                                    reply_to_id=reply_to,
+                                )
+                                tweet_id = result.get("tweet_id")
+                                if reply_to is None:
+                                    reply_to = tweet_id  # thread subsequent tweets
+                                posted = True
+                            except Exception as exc:
+                                logger.warning(
+                                    "deliverable_post_failed",
+                                    error=str(exc),
+                                    company=company,
+                                )
+                                break
+
+                    completed.append({
+                        "step_number": step.get("step_number", 0),
+                        "type": "public_deliverable",
+                        "description": description,
+                        "content": content,
+                        "posted": posted,
+                        "platform": platform,
+                        "tweet_id": tweet_id,
+                        "status": "completed" if posted else "drafted",
+                    })
+
+                    logger.info(
+                        "deliverable_completed",
+                        company=company,
+                        role=role,
+                        platform=platform,
+                        posted=posted,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "deliverable_draft_failed",
+                        company=company,
+                        description=description,
+                        error=str(exc),
+                    )
+                    completed.append({
+                        "step_number": step.get("step_number", 0),
+                        "type": "public_deliverable",
+                        "description": description,
+                        "status": "failed",
+                        "error": str(exc),
+                    })
+
+            elif step_type == "email":
+                # Email steps are handled by the main routing logic
+                completed.append({
+                    "step_number": step.get("step_number", 0),
+                    "type": "email",
+                    "description": description,
+                    "status": "handled_by_main_flow",
+                })
+            else:
+                # Interviews, forms, etc. — needs human
+                completed.append({
+                    "step_number": step.get("step_number", 0),
+                    "type": step_type,
+                    "description": description,
+                    "status": "needs_human",
+                })
+
+        return completed
+
+    async def _escalate_multi_step(
+        self,
+        url: str,
+        role: str,
+        company: str,
+        cover_note: str,
+        steps: list[dict],
+        deliverables: list[dict],
+    ) -> str:
+        """Escalate a multi-step application to Wave with full context.
+
+        Shows what the agent already completed (e.g. posted a tweet)
+        and what still needs human action (e.g. attend an interview).
+
+        Args:
+            url: Job posting URL.
+            role: Job title.
+            company: Company name.
+            cover_note: Drafted cover note.
+            steps: All application steps.
+            deliverables: Completed deliverable results.
+
+        Returns:
+            Status string.
+        """
+        # Build a summary of what was done vs what needs Wave
+        done_lines = []
+        todo_lines = []
+        for d in deliverables:
+            if d.get("status") in ("completed", "drafted"):
+                preview = d.get("content", "")[:150]
+                done_lines.append(f"✓ Step {d.get('step_number')}: {d.get('description', '')}\n  → {preview}")
+            elif d.get("status") == "needs_human":
+                todo_lines.append(f"⬜ Step {d.get('step_number')}: {d.get('description', '')}")
+
+        summary = f"Multi-Step Application — {role} @ {company}\n\n"
+        summary += f"URL: {url}\n\n"
+
+        if done_lines:
+            summary += "COMPLETED BY AGENT:\n" + "\n".join(done_lines) + "\n\n"
+        if todo_lines:
+            summary += "NEEDS YOU:\n" + "\n".join(todo_lines) + "\n\n"
+
+        summary += f"Cover note (if needed):\n{cover_note}"
+
+        try:
+            draft_skill = await skill_registry.get("draft_approval")
+            await draft_skill.execute(
+                draft=summary,
+                platform="email",
+                title=f"[multi-step] {role} @ {company}",
+                thread_context=f"Multi-step application at {url}",
+            )
+            logger.info(
+                "multi_step_escalated",
+                url=url,
+                role=role,
+                company=company,
+                steps_completed=len(done_lines),
+                steps_remaining=len(todo_lines),
+            )
+        except Exception as exc:
+            logger.error("multi_step_escalation_failed", url=url, error=str(exc))
+
+        return "partially_applied"
 
     async def _save_application(
         self,

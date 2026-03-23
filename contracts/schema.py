@@ -11,6 +11,18 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+class ContractBudget(BaseModel):
+    """Per-contract X API budget allocation.
+
+    If set, overrides the global budget for this contract's operations.
+    If not set (all zeros), the contract shares the global budget.
+    """
+
+    monthly_budget_cents: int = 0       # 0 = use global budget
+    daily_tweet_cap: int = 0            # 0 = use global cap
+    follower_page_cap: int = 0          # 0 = use global cap
+
+
 class ContractMeta(BaseModel):
     """Client-specific configuration stored in the contract's meta JSONB column."""
 
@@ -26,6 +38,7 @@ class ContractMeta(BaseModel):
     feature_request_endpoint: str = ""
     platforms: list[str] = Field(default_factory=list)
     active_skills: list[str] = Field(default_factory=list)
+    budget: ContractBudget = Field(default_factory=ContractBudget)
 
 
 class ContractCreate(BaseModel):

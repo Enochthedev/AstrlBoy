@@ -43,6 +43,16 @@ async def budget() -> dict:
     monthly = await budget_tracker.get_monthly_spend()
     tweets_today = await budget_tracker.get_tweet_count_today()
 
+    # Per-contract spend breakdown
+    contracts = await contracts_service.get_active_contracts()
+    contract_spend = {}
+    for c in contracts:
+        contract_spend[c.client_slug] = await budget_tracker.get_contract_spend(c.client_slug)
+        # Include per-contract budget if set
+        meta_budget = (c.meta or {}).get("budget", {})
+        if meta_budget.get("monthly_budget_cents", 0) > 0:
+            contract_spend[c.client_slug]["budget_cents"] = meta_budget["monthly_budget_cents"]
+
     return {
         "daily": {
             **daily,
@@ -51,4 +61,5 @@ async def budget() -> dict:
             "tweets_remaining": max(0, budget_tracker.daily_tweet_cap - tweets_today),
         },
         "monthly": monthly,
+        "contracts": contract_spend,
     }

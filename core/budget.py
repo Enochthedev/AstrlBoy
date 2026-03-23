@@ -106,12 +106,17 @@ class BudgetTracker:
         self,
         operation: XOperation,
         count: int = 1,
+        contract_slug: str | None = None,
     ) -> float:
         """Record an API operation and return the cost in cents.
+
+        Tracks against both the global budget and the per-contract budget
+        (if a contract_slug is provided). This lets you see spend per client.
 
         Args:
             operation: The type of X API operation.
             count: Number of units (e.g. 10 tweets read = count=10).
+            contract_slug: Optional contract slug to track per-client spend.
 
         Returns:
             Total cost in cents for this operation.
@@ -126,10 +131,21 @@ class BudgetTracker:
             monthly_key = self._monthly_key()
 
             pipe = redis_client.pipeline()
+            # Global tracking
             pipe.hincrbyfloat(daily_key, operation.value, cost)
             pipe.hincrbyfloat(monthly_key, operation.value, cost)
             pipe.expire(daily_key, _ONE_DAY)
             pipe.expire(monthly_key, _THIRTY_DAYS)
+
+            # Per-contract tracking — enables per-client budget dashboards
+            if contract_slug:
+                contract_monthly = f"{_MONTHLY_KEY}:{datetime.now(timezone.utc).strftime('%Y-%m')}:{contract_slug}"
+                contract_daily = f"{_DAILY_KEY}:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}:{contract_slug}"
+                pipe.hincrbyfloat(contract_monthly, operation.value, cost)
+                pipe.hincrbyfloat(contract_daily, operation.value, cost)
+                pipe.expire(contract_monthly, _THIRTY_DAYS)
+                pipe.expire(contract_daily, _ONE_DAY)
+
             await pipe.execute()
 
             logger.debug(
@@ -137,6 +153,7 @@ class BudgetTracker:
                 operation=operation.value,
                 count=count,
                 cost_cents=cost,
+                contract_slug=contract_slug,
             )
         except Exception as exc:
             logger.warning("budget_track_failed", error=str(exc))
@@ -308,6 +325,54 @@ class BudgetTracker:
                 "budget_remaining": self.monthly_budget_cents / 100,
                 "tier_recommendation": None,
             }
+
+    async def get_contract_spend(self, contract_slug: str) -> dict[str, Any]:
+        """Get this month's spend for a specific contract.
+
+        Args:
+            contract_slug: The client slug (e.g. 'mentorable').
+
+        Returns:
+            Dict with per-operation breakdown and total in dollars.
+        """
+        if redis_client is None:
+            return {"total": 0, "breakdown": {}}
+
+        try:
+            month = datetime.now(timezone.utc).strftime("%Y-%m")
+            key = f"{_MONTHLY_KEY}:{month}:{contract_slug}"
+            all_costs = await redis_client.hgetall(key)
+            breakdown = {k: round(float(v) / 100, 4) for k, v in all_costs.items()} if all_costs else {}
+            total = sum(breakdown.values())
+            return {"contract_slug": contract_slug, "total": round(total, 4), "breakdown": breakdown}
+        except Exception:
+            return {"contract_slug": contract_slug, "total": 0, "breakdown": {}}
+
+    async def check_contract_budget(
+        self,
+        contract_slug: str,
+        contract_budget_cents: int,
+    ) -> bool:
+        """Check if a contract is within its dedicated budget.
+
+        Args:
+            contract_slug: The client slug.
+            contract_budget_cents: The contract's monthly budget in cents.
+
+        Returns:
+            True if under budget, False if exhausted.
+        """
+        if redis_client is None or contract_budget_cents <= 0:
+            return True  # 0 = no per-contract limit, use global
+
+        try:
+            month = datetime.now(timezone.utc).strftime("%Y-%m")
+            key = f"{_MONTHLY_KEY}:{month}:{contract_slug}"
+            all_costs = await redis_client.hgetall(key)
+            total_cents = sum(float(v) for v in all_costs.values()) if all_costs else 0
+            return total_cents < contract_budget_cents
+        except Exception:
+            return True
 
     def _recommend_tier(self, current_monthly_dollars: float) -> dict[str, Any] | None:
         """Recommend a tier change if projected spend exceeds a fixed tier's cost."""
