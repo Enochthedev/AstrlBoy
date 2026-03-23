@@ -5,6 +5,7 @@ Starts the async web server, initializes all subsystems on startup,
 and tears them down gracefully on shutdown.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -192,12 +193,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("scheduler_started")
 
     # Start Telegram bot (polling mode, runs alongside FastAPI)
+    # Short delay before starting polling — during Railway redeployments the old
+    # instance may still be polling when we start. Waiting lets it die first,
+    # preventing the "terminated by other getUpdates request" 409 conflict.
     try:
         _telegram_app = create_telegram_app()
         if _telegram_app:
             await _telegram_app.initialize()
             await _telegram_app.start()
-            await _telegram_app.updater.start_polling(drop_pending_updates=True)
+            await asyncio.sleep(3)
+            await _telegram_app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=["message", "callback_query"],
+            )
             logger.info("telegram_bot_started")
     except Exception as exc:
         logger.warning("telegram_bot_start_failed", error=str(exc))

@@ -123,13 +123,13 @@ async def start_stream() -> XFilteredStream | None:
 
     if all_keywords:
         # Clear existing rules
-        existing = stream.get_rules()
+        existing = await stream.get_rules()
         if existing and existing.data:
-            stream.delete_rules([r.id for r in existing.data])
+            await stream.delete_rules([r.id for r in existing.data])
 
         # Add new rules (max 512 chars per rule)
         rule_value = " OR ".join(list(all_keywords)[:25])
-        stream.add_rules(tweepy.StreamRule(value=rule_value, tag="astrlboy"))
+        await stream.add_rules(tweepy.StreamRule(value=rule_value, tag="astrlboy"))
 
     # Start filtering (non-blocking)
     stream.filter(tweet_fields=["text", "created_at", "author_id"])
