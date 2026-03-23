@@ -54,6 +54,12 @@ from skills.builtin.thread_x import ThreadXSkill
 from skills.builtin.track_keyword_rankings import TrackKeywordRankingsSkill
 from skills.builtin.trend_stream import TrendStreamSkill
 from skills.builtin.unfollow_x import UnfollowXSkill
+from skills.builtin.like_x import LikeXSkill
+from skills.builtin.retweet_x import RetweetXSkill
+from skills.builtin.delete_tweet_x import DeleteTweetXSkill
+from skills.builtin.bookmark_x import BookmarkXSkill
+from skills.builtin.get_user_tweets_x import GetUserTweetsXSkill
+from skills.builtin.check_email_status import CheckEmailStatusSkill
 from skills.registry import skill_registry
 
 logger = get_logger("main")
@@ -173,6 +179,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ScanJobBoardsSkill, ApplyToUrlSkill,
         # X — threading
         ThreadXSkill,
+        # X — engagement + management
+        LikeXSkill, RetweetXSkill, DeleteTweetXSkill,
+        BookmarkXSkill, GetUserTweetsXSkill,
+        # Email — delivery tracking
+        CheckEmailStatusSkill,
         # Stream + approval
         TrendStreamSkill, DraftApprovalSkill,
         GetMentionsSkill, GetTimelineSkill,
