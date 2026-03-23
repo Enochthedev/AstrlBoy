@@ -106,11 +106,38 @@ class XFilteredStream(AsyncStreamingClient):
 async def start_stream() -> XFilteredStream | None:
     """Start the filtered stream as a background task.
 
+    DISABLED on pay-per-use tier — every streamed tweet costs $0.005 as a post
+    read. With broad keywords like "crypto" and "startup", that's hundreds of
+    reads per day ($30-50+/month) for trend signals that can be collected more
+    cheaply via periodic search queries.
+
+    Set X_STREAM_ENABLED=true to force-enable (e.g. after upgrading to Basic/Pro
+    tier where reads are included).
+
     Returns:
-        The stream instance, or None if bearer token is not configured.
+        The stream instance, or None if disabled or not configured.
     """
     if not settings.twitter_bearer_token:
         logger.warning("x_stream_not_configured")
+        return None
+
+    if not settings.x_stream_enabled:
+        # Clean up any existing stream rules so stale rules don't
+        # accidentally cost money if the stream reconnects
+        try:
+            cleanup = AsyncStreamingClient(bearer_token=settings.twitter_bearer_token)
+            existing = await cleanup.get_rules()
+            if existing and existing.data:
+                await cleanup.delete_rules([r.id for r in existing.data])
+                logger.info("x_stream_rules_cleaned", count=len(existing.data))
+        except Exception:
+            pass
+
+        logger.info(
+            "x_stream_disabled",
+            reason="Pay-per-use tier — stream reads cost $0.005 each. "
+            "Set X_STREAM_ENABLED=true to enable after upgrading tier.",
+        )
         return None
 
     stream = XFilteredStream()

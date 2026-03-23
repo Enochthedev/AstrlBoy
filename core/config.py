@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     x_daily_tweet_cap: int = 15          # max tweets (posts + replies) per day
     x_monthly_budget_cents: int = 500    # monthly X API budget in cents ($5.00 default)
     x_follower_page_cap: int = 3         # max pagination pages when fetching followers (3 × 100 = 300)
+    x_stream_enabled: bool = False       # disabled on pay-per-use — each streamed tweet costs $0.005
 
 
 # Singleton — import this everywhere
