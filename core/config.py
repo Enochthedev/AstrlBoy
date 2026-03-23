@@ -46,22 +46,20 @@ class Settings(BaseSettings):
     linkedin_client_secret: str = ""
     linkedin_access_token: str = ""
 
-    # Email — SMTP outbound
+    # Email — Resend (HTTP API for sending, webhook for receiving)
+    resend_api_key: str = ""         # Resend API key (re_...)
+    agent_email: str = "agent@astrlboy.xyz"
+    resend_webhook_secret: str = ""  # svix signing secret from Resend dashboard
+
+    # Legacy SMTP/IMAP — kept for backwards compat, no longer used
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_pass: str = ""
-
-    # Email — IMAP inbound
     imap_host: str = ""
     imap_port: int = 993
     imap_user: str = ""
     imap_pass: str = ""
-
-    agent_email: str = "agent@astrlboy.xyz"
-
-    # Resend inbound webhook
-    resend_webhook_secret: str = ""   # svix signing secret from Resend dashboard
 
     # Telegram
     telegram_bot_token: str = ""

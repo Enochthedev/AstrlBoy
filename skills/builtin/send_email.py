@@ -1,14 +1,15 @@
 """
-SMTP email sending skill via Resend.
+Email sending skill via Resend HTTP API.
 
-Used for sending job applications from agent@astrlboy.xyz,
-delivering weekly briefings, and any outbound email.
+Railway blocks outbound SMTP ports for hobby users, so we call the
+Resend REST API directly via httpx. The RESEND_API_KEY is the same
+key that was previously used as SMTP_PASS — Resend uses one key
+for both SMTP and HTTP API access.
 """
 
-from email.message import EmailMessage
 from typing import Any
 
-import aiosmtplib
+import httpx
 
 from core.config import settings
 from core.exceptions import SkillExecutionError
@@ -17,13 +18,15 @@ from skills.base import BaseTool
 
 logger = get_logger("skills.send_email")
 
+_RESEND_API_URL = "https://api.resend.com/emails"
+
 
 class SendEmailSkill(BaseTool):
-    """Send an email via SMTP (Resend)."""
+    """Send an email via Resend HTTP API."""
 
     name = "send_email"
-    description = "Send an email via SMTP. Used for applications, briefings, and outbound comms."
-    version = "1.0.0"
+    description = "Send an email via Resend. Used for applications, briefings, and outbound comms."
+    version = "2.0.0"
 
     async def execute(
         self,
@@ -34,7 +37,7 @@ class SendEmailSkill(BaseTool):
         html: bool = False,
         **kwargs: Any,
     ) -> dict[str, str]:
-        """Send an email.
+        """Send an email via Resend HTTP API.
 
         Args:
             to: Recipient email address.
@@ -44,34 +47,48 @@ class SendEmailSkill(BaseTool):
             html: If True, body is treated as HTML.
 
         Returns:
-            Dict with 'to', 'subject', and 'status'.
+            Dict with 'to', 'subject', 'status', and 'resend_id'.
 
         Raises:
             SkillExecutionError: If sending fails.
         """
+        sender = from_addr or settings.agent_email
+        api_key = settings.resend_api_key
+
+        if not api_key:
+            raise SkillExecutionError("RESEND_API_KEY not configured")
+
+        payload: dict[str, Any] = {
+            "from": sender,
+            "to": [to],
+            "subject": subject,
+        }
+        if html:
+            payload["html"] = body
+        else:
+            payload["text"] = body
+
         try:
-            msg = EmailMessage()
-            msg["From"] = from_addr or settings.agent_email
-            msg["To"] = to
-            msg["Subject"] = subject
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    _RESEND_API_URL,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
 
-            if html:
-                msg.set_content("Plain text version not available.")
-                msg.add_alternative(body, subtype="html")
-            else:
-                msg.set_content(body)
+            resend_id = data.get("id", "")
+            logger.info("email_sent", to=to, subject=subject, resend_id=resend_id)
+            return {"to": to, "subject": subject, "status": "sent", "resend_id": resend_id}
 
-            await aiosmtplib.send(
-                msg,
-                hostname=settings.smtp_host,
-                port=settings.smtp_port,
-                username=settings.smtp_user,
-                password=settings.smtp_pass,
-                start_tls=True,
-            )
-
-            logger.info("email_sent", to=to, subject=subject)
-            return {"to": to, "subject": subject, "status": "sent"}
+        except httpx.HTTPStatusError as exc:
+            error_body = exc.response.text
+            logger.error("send_email_failed", to=to, status=exc.response.status_code, error=error_body)
+            raise SkillExecutionError(f"Email send failed to {to}: {exc.response.status_code} {error_body}") from exc
         except Exception as exc:
             logger.error("send_email_failed", to=to, error=str(exc))
             raise SkillExecutionError(f"Email send failed to {to}: {exc}") from exc

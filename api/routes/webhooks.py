@@ -72,7 +72,7 @@ async def _fetch_email_body(email_id: str) -> tuple[str, str]:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"https://api.resend.com/emails/receiving/{email_id}",
-                headers={"Authorization": f"Bearer {settings.smtp_pass}"},
+                headers={"Authorization": f"Bearer {settings.resend_api_key}"},
                 timeout=10,
             )
             resp.raise_for_status()

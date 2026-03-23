@@ -10,12 +10,13 @@ where Claude can research, draft, post, follow, analyze, and more in
 whatever sequence makes sense for the task.
 """
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from anthropic import APIStatusError, AsyncAnthropic, RateLimitError
 
 from agent.service import agent_service
 from core.config import settings
@@ -232,13 +233,49 @@ async def run_autonomous(
     )
 
     for turn in range(max_turns):
-        response = await client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=system,
-            tools=tools,
-            messages=messages,
-        )
+        # Retry with backoff on rate limits — the autonomous loop makes many
+        # sequential calls and is most likely to hit 429s
+        response = None
+        for attempt in range(3):
+            try:
+                response = await client.messages.create(
+                    model=model,
+                    max_tokens=4096,
+                    system=system,
+                    tools=tools,
+                    messages=messages,
+                )
+                break
+            except (RateLimitError, APIStatusError) as exc:
+                status = getattr(exc, "status_code", 0)
+                if status not in (429, 529):
+                    raise
+                if attempt < 2:
+                    wait = 2 ** (attempt + 1)  # 2s, 4s
+                    logger.warning(
+                        "autonomous_rate_limited",
+                        turn=turn + 1,
+                        attempt=attempt + 1,
+                        wait_seconds=wait,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    # Final attempt — try OpenRouter if available
+                    if settings.openrouter_api_key:
+                        logger.info("autonomous_openrouter_fallback", turn=turn + 1)
+                        from core.ai import create_message
+                        response = await create_message(
+                            model=model,
+                            max_tokens=4096,
+                            system=system,
+                            messages=messages,
+                        )
+                        # OpenRouter fallback doesn't support tools — return text only
+                        break
+                    raise
+
+        if response is None:
+            break
 
         # Extract text blocks
         text_parts = []

@@ -8,8 +8,7 @@ drafts applications, and logs everything.
 import json
 from uuid import uuid4
 
-from anthropic import AsyncAnthropic
-
+from core.ai import create_message
 from core.config import settings
 from core.logging import get_logger
 from db.base import async_session_factory
@@ -19,8 +18,6 @@ from skills.registry import skill_registry
 from storage.r2 import r2_client
 
 logger = get_logger("graphs.applications.nodes")
-
-_anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
 async def scan_job_boards(state: ApplicationState) -> ApplicationState:
@@ -89,7 +86,7 @@ async def score_fit(state: ApplicationState) -> ApplicationState:
         f"- {p['title']}: {p['description'][:200]}" for p in postings
     )
 
-    response = await _anthropic.messages.create(
+    response = await create_message(
         model="claude-haiku-4-5",
         max_tokens=500,
         system=(
@@ -324,7 +321,7 @@ async def _find_company_x_target(company: str, posting_url: str) -> dict | None:
         for r in search_results
     )
 
-    response = await _anthropic.messages.create(
+    response = await create_message(
         model="claude-haiku-4-5",
         max_tokens=200,
         system=(
@@ -429,7 +426,7 @@ async def _find_reply_worthy_tweet(
             f"{i}. {c['text'][:200]}" for i, c in enumerate(candidates)
         )
 
-        response = await _anthropic.messages.create(
+        response = await create_message(
             model="claude-haiku-4-5",
             max_tokens=100,
             system=(
@@ -495,7 +492,7 @@ async def _draft_outreach_reply(
     Returns:
         Reply text (max 280 characters).
     """
-    response = await _anthropic.messages.create(
+    response = await create_message(
         model="claude-sonnet-4-6",
         max_tokens=200,
         system=(
@@ -605,7 +602,7 @@ async def draft_application(state: ApplicationState) -> ApplicationState:
                         f"Do NOT make it the focus — keep it as a brief, natural mention."
                     )
 
-                response = await _anthropic.messages.create(
+                response = await create_message(
                     model="claude-sonnet-4-6",
                     max_tokens=500,
                     system=(
