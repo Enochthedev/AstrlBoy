@@ -112,6 +112,7 @@ async def _bootstrap_self_contract() -> None:
                 "active_skills": [
                     "search",
                     "serp",
+                    "scrape",
                     "post_x",
                     "reply_x",
                     "follow_x",
@@ -125,6 +126,10 @@ async def _bootstrap_self_contract() -> None:
                     "get_mentions",
                     "get_timeline",
                     "fetch_page",
+                    "send_email",
+                    "read_email",
+                    "apply_to_url",
+                    "extract_sentiment",
                 ],
             },
         )
@@ -182,6 +187,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _bootstrap_self_contract()
     except Exception as exc:
         logger.warning("bootstrap_failed", error=str(exc))
+
+    # Sync self-contract active_skills with the codebase — ensures new skills
+    # are available without manual DB edits after deploy
+    try:
+        from db.base import async_session_factory
+        from db.models.contracts import Contract
+        from sqlalchemy import select
+
+        _all_skill_names = [s.name for s in await skill_registry.list_all()]
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Contract).where(Contract.client_slug == "astrlboy")
+            )
+            self_c = result.scalar_one_or_none()
+            if self_c:
+                meta = dict(self_c.meta or {})
+                old_skills = set(meta.get("active_skills", []))
+                new_skills = set(_all_skill_names)
+                if not new_skills.issubset(old_skills):
+                    meta["active_skills"] = _all_skill_names
+                    self_c.meta = meta
+                    await session.commit()
+                    added = new_skills - old_skills
+                    logger.info("self_contract_skills_synced", added=list(added))
+    except Exception as exc:
+        logger.warning("skill_sync_failed", error=str(exc))
 
     # Load contract registry
     try:

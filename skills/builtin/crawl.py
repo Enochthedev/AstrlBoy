@@ -44,7 +44,9 @@ class CrawlSkill(BaseTool):
             SkillExecutionError: If the crawl fails.
         """
         try:
-            result = self._client.crawl_url(
+            # Firecrawl v2 SDK renamed crawl_url → crawl
+            crawl_fn = getattr(self._client, "crawl", None) or self._client.crawl_url
+            result = crawl_fn(
                 url,
                 params={
                     "limit": max_pages,

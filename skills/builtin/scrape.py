@@ -46,7 +46,9 @@ class ScrapeSkill(BaseTool):
                 params["formats"].append("extract")
                 params["extract"] = {"schema": extract_schema}
 
-            result = self._client.scrape_url(url, params=params)
+            # Firecrawl v2 SDK renamed scrape_url → scrape
+            scrape_fn = getattr(self._client, "scrape", None) or self._client.scrape_url
+            result = scrape_fn(url, params=params)
 
             if extract_schema and result.get("extract"):
                 return result["extract"]

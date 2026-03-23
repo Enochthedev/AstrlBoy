@@ -93,7 +93,12 @@ async def _build_system_prompt(contract: Contract | None = None) -> str:
         "- When replying, add genuine value — don't just agree.\n"
         "- Log important actions — dump to R2 when you create content or make decisions.\n"
         "- If something is risky or irreversible, say so before doing it.\n"
-        "- If you need a tool/skill that doesn't exist, use request_skill to ask Wave to build it.\n"
+        "- If you need a tool/skill that doesn't exist, use request_skill to ask Wave to build it.\n\n"
+        "FORMATTING:\n"
+        "- You are talking in a Telegram chat. Write like a human in a chat — no markdown.\n"
+        "- No ** for bold, no ## headers, no | tables |, no bullet point walls.\n"
+        "- Use plain text, line breaks, and dashes for structure.\n"
+        "- No emoji spam. One or two max if they add meaning.\n"
     )
 
     mode_note = ""

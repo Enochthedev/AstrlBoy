@@ -717,14 +717,25 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             contract=contract,
         )
 
-        # Send result back — split long messages
+        # Clean markdown artifacts — agent should write plain text for Telegram
+        # but strip any remaining markdown as a safety net
+        import re
+
         response_text = agent_result.text or "Done (no text output)."
+        response_text = re.sub(r"\*\*(.+?)\*\*", r"\1", response_text)  # **bold** → bold
+        response_text = re.sub(r"__(.+?)__", r"\1", response_text)      # __bold__ → bold
+        response_text = re.sub(r"\*(.+?)\*", r"\1", response_text)      # *italic* → italic
+        response_text = re.sub(r"^#{1,6}\s+", "", response_text, flags=re.MULTILINE)  # ## headers
+        response_text = re.sub(r"^[|].*[|]$", "", response_text, flags=re.MULTILINE)  # | tables |
+        response_text = re.sub(r"^[-]{3,}$", "", response_text, flags=re.MULTILINE)   # ---
+        response_text = re.sub(r"\n{3,}", "\n\n", response_text)        # collapse blank lines
+
         tool_summary = ""
         if agent_result.tool_calls:
             tools_used = list({tc["tool"] for tc in agent_result.tool_calls})
             tool_summary = f"\n\n[{agent_result.turns} turns | tools: {', '.join(tools_used)}]"
 
-        full_response = response_text + tool_summary
+        full_response = response_text.strip() + tool_summary
 
         # Telegram max message length is 4096
         if len(full_response) <= 4096:
