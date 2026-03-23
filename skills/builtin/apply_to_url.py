@@ -480,23 +480,33 @@ class ApplyToUrlSkill(BaseTool):
                     # Post it if platform is X and the skill is available
                     posted = False
                     tweet_id = None
-                    if platform == "x" and await skill_registry.is_available("post_x"):
-                        post_skill = await skill_registry.get("post_x")
-                        # Handle thread (split by ---) or single tweet
+                    thread_url = None
+                    if platform == "x":
+                        # Parse into tweets — split by --- delimiter
                         tweets = [t.strip() for t in content.split("---") if t.strip()]
                         if not tweets:
                             tweets = [content[:280]]
 
-                        reply_to = None
-                        for tweet_text in tweets:
+                        # Use thread_x for multi-tweet content, post_x for single
+                        if len(tweets) >= 2 and await skill_registry.is_available("thread_x"):
                             try:
-                                result = await post_skill.execute(
-                                    text=tweet_text[:280],
-                                    reply_to_id=reply_to,
+                                thread_skill = await skill_registry.get("thread_x")
+                                result = await thread_skill.execute(tweets=tweets)
+                                posted = True
+                                tweet_ids = result.get("thread_tweet_ids", [])
+                                tweet_id = tweet_ids[0] if tweet_ids else None
+                                thread_url = result.get("thread_url")
+                            except Exception as exc:
+                                logger.warning(
+                                    "deliverable_thread_failed",
+                                    error=str(exc),
+                                    company=company,
                                 )
+                        elif await skill_registry.is_available("post_x"):
+                            try:
+                                post_skill = await skill_registry.get("post_x")
+                                result = await post_skill.execute(text=tweets[0][:280])
                                 tweet_id = result.get("tweet_id")
-                                if reply_to is None:
-                                    reply_to = tweet_id  # thread subsequent tweets
                                 posted = True
                             except Exception as exc:
                                 logger.warning(
@@ -504,7 +514,6 @@ class ApplyToUrlSkill(BaseTool):
                                     error=str(exc),
                                     company=company,
                                 )
-                                break
 
                     completed.append({
                         "step_number": step.get("step_number", 0),
@@ -514,6 +523,7 @@ class ApplyToUrlSkill(BaseTool):
                         "posted": posted,
                         "platform": platform,
                         "tweet_id": tweet_id,
+                        "thread_url": thread_url,
                         "status": "completed" if posted else "drafted",
                     })
 

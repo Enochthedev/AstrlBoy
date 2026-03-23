@@ -4,8 +4,13 @@ Telegram draft approval skill.
 Sends drafted content/replies to Wave via Telegram for approval.
 Creates an Interaction record if one doesn't exist, so the approve/reject
 commands can look it up and post it.
+
+Supports post_actions — follow-up actions (like sending an email) that
+execute automatically after the draft is approved and posted. Actions
+are stored in thread_context and picked up by cmd_approve.
 """
 
+import json
 from typing import Any
 
 from telegram import Bot
@@ -39,6 +44,7 @@ class DraftApprovalSkill(BaseTool):
         contract_slug: str = "",
         title: str = "",
         thread_context: str = "",
+        post_actions: list[dict] | None = None,
         **kwargs: Any,
     ) -> dict[str, str]:
         """Send a draft for approval.
@@ -53,6 +59,11 @@ class DraftApprovalSkill(BaseTool):
             contract_slug: Client slug for context.
             title: Title/label for the draft.
             thread_context: Context about the thread being replied to.
+            post_actions: Follow-up actions to execute after posting is approved.
+                Each action is a dict with 'type' and action-specific fields.
+                Supported types:
+                - send_email: {type, to, subject, body}
+                  Body can use {thread_url} and {tweet_id} placeholders.
 
         Returns:
             Dict with 'status', 'message_id', and 'interaction_id'.
@@ -73,13 +84,19 @@ class DraftApprovalSkill(BaseTool):
                     except Exception:
                         pass  # Self-posts won't have a contract — that's fine
 
+                # Encode post_actions into thread_context so cmd_approve can
+                # execute them after posting (e.g. send a follow-up email)
+                stored_context = thread_context or f"[{contract_slug}] {title}"
+                if post_actions:
+                    stored_context += f"\n---POST_ACTIONS---\n{json.dumps(post_actions)}"
+
                 async with async_session_factory() as session:
                     interaction = Interaction(
                         contract_id=contract_id,
                         platform=platform,
                         draft=draft,
                         status=InteractionStatus.PENDING,
-                        thread_context=thread_context or f"[{contract_slug}] {title}",
+                        thread_context=stored_context,
                     )
                     session.add(interaction)
                     await session.commit()
@@ -124,6 +141,22 @@ class DraftApprovalSkill(BaseTool):
                 "contract_slug": {"type": "string", "description": "Client slug for context"},
                 "title": {"type": "string", "description": "Title/label for the draft"},
                 "thread_context": {"type": "string", "description": "Thread context"},
+                "post_actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "description": "Action type: 'send_email'"},
+                            "to": {"type": "string", "description": "Email recipient"},
+                            "subject": {"type": "string", "description": "Email subject"},
+                            "body": {"type": "string", "description": "Email body. Use {thread_url} or {tweet_id} as placeholders for the posted content URL."},
+                        },
+                    },
+                    "description": (
+                        "Follow-up actions to execute after the draft is approved and posted. "
+                        "Use {thread_url} in the body to insert the URL of the posted thread/tweet."
+                    ),
+                },
             },
             "required": ["draft"],
         }

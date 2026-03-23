@@ -3,9 +3,15 @@ Cloudflare R2 client for raw data dumps.
 
 Every significant agent action dumps its raw I/O here for future model training.
 Key naming: {contract_slug}/{yyyy}/{mm}/{dd}/{entity_type}/{uuid}.json
+
+boto3 calls are synchronous — we run them via asyncio.to_thread() to avoid
+blocking the event loop. SSL verification is disabled because R2 endpoints
+use Cloudflare-issued certificates that some container runtimes don't trust.
 """
 
+import asyncio
 import json
+import os
 import urllib3
 from datetime import datetime, timezone
 from typing import Any
@@ -14,8 +20,10 @@ from uuid import UUID
 import boto3
 from botocore.config import Config as BotoConfig
 
-# R2 uses Cloudflare-issued certs that boto3 can't verify in some environments
+# R2 uses Cloudflare-issued certs that boto3 can't verify in some environments.
+# Disable warnings globally and also set env vars that urllib3/requests check.
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+os.environ.setdefault("PYTHONHTTPSVERIFY", "0")
 
 from core.config import settings
 from core.exceptions import ExternalAPIError
@@ -100,10 +108,13 @@ class R2Client:
         }
 
         try:
-            self._client.put_object(
+            body = json.dumps(payload, default=str)
+            # boto3 is synchronous — run in a thread to avoid blocking the loop
+            await asyncio.to_thread(
+                self._client.put_object,
                 Bucket=self._bucket,
                 Key=key,
-                Body=json.dumps(payload, default=str),
+                Body=body,
                 ContentType="application/json",
             )
             logger.info(
@@ -130,7 +141,10 @@ class R2Client:
             ExternalAPIError: If the retrieval fails.
         """
         try:
-            response = self._client.get_object(Bucket=self._bucket, Key=key)
+            # boto3 is synchronous — run in a thread to avoid blocking the loop
+            response = await asyncio.to_thread(
+                self._client.get_object, Bucket=self._bucket, Key=key
+            )
             body = response["Body"].read().decode("utf-8")
             return json.loads(body)
         except Exception as exc:

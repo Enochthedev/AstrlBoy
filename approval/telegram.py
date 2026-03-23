@@ -5,6 +5,8 @@ Wave can approve/reject drafts, pause/resume the agent, check status,
 and monitor contracts, content, trends, and escalations.
 """
 
+import json
+import re
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -34,11 +36,65 @@ from db.models.trend_signals import TrendSignal
 logger = get_logger("approval.telegram")
 
 
+# ── Thread parsing helpers ────────────────────────────────────────
+
+
+def _parse_thread_draft(draft: str) -> list[str]:
+    """Parse a thread-style draft into individual tweets.
+
+    Supports formats:
+    - "Tweet 1:\\n...\\n\\nTweet 2:\\n..." (numbered tweet labels)
+    - Separated by "---" delimiters
+
+    Returns a list of tweet texts. If the draft is not a thread
+    (single tweet or unrecognized format), returns an empty list.
+    """
+    # Try "Tweet N:" format — the autonomous agent uses this
+    parts = re.split(r"Tweet\s+\d+:\s*\n", draft)
+    tweets = [p.strip() for p in parts if p.strip()]
+    if len(tweets) >= 2:
+        return tweets
+
+    # Try "---" separator — used by apply_to_url deliverables
+    parts = [p.strip() for p in draft.split("---") if p.strip()]
+    if len(parts) >= 2:
+        return parts
+
+    return []
+
+
+def _extract_post_actions(thread_context: str) -> tuple[str, list[dict]]:
+    """Extract post-approval actions from thread_context.
+
+    Actions are stored as a JSON array after a ---POST_ACTIONS--- delimiter.
+
+    Returns:
+        Tuple of (clean_context, actions_list).
+    """
+    delimiter = "---POST_ACTIONS---"
+    if delimiter not in thread_context:
+        return thread_context, []
+
+    try:
+        clean_context, actions_json = thread_context.split(delimiter, 1)
+        actions = json.loads(actions_json.strip())
+        if isinstance(actions, list):
+            return clean_context.strip(), actions
+    except (ValueError, json.JSONDecodeError):
+        pass
+
+    return thread_context, []
+
+
 # ── Approval commands ──────────────────────────────────────────────
 
 
 async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Approve a pending interaction and post it immediately.
+
+    Detects thread-style drafts (multiple tweets) and uses thread_x.
+    Executes any post-approval actions stored in thread_context
+    (e.g. sending a follow-up email after posting).
 
     Usage: /approve <interaction_id>
     """
@@ -61,31 +117,116 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             interaction.posted_at = datetime.now(timezone.utc)
             draft_text = interaction.draft
             platform = interaction.platform
+            thread_context = interaction.thread_context or ""
             await session.commit()
+
+        # Extract any post-approval actions before posting
+        _, post_actions = _extract_post_actions(thread_context)
 
         # Post the approved content
         posted = False
+        post_result: dict = {}
         if draft_text and platform:
             try:
                 from skills.registry import skill_registry
 
-                skill_name = f"post_{platform}"
-                if await skill_registry.is_available(skill_name):
-                    skill = await skill_registry.get(skill_name)
-                    result = await skill.execute(text=draft_text[:280] if platform == "x" else draft_text)
-                    posted = True
-                    tweet_id = result.get("tweet_id", "")
-                    await update.message.reply_text(
-                        f"Approved & posted!\n\n{draft_text[:200]}\n\nTweet ID: {tweet_id}"
-                    )
+                if platform == "x":
+                    # Detect thread-style drafts and use thread_x
+                    tweets = _parse_thread_draft(draft_text)
+                    if len(tweets) >= 2 and await skill_registry.is_available("thread_x"):
+                        thread_skill = await skill_registry.get("thread_x")
+                        post_result = await thread_skill.execute(tweets=tweets)
+                        posted = True
+                        thread_url = post_result.get("thread_url", "")
+                        count = post_result.get("count", len(tweets))
+                        await update.message.reply_text(
+                            f"Approved & posted thread ({count} tweets)!\n\n"
+                            f"{tweets[0][:200]}\n\n"
+                            f"Thread: {thread_url}"
+                        )
+                    else:
+                        # Single tweet
+                        if await skill_registry.is_available("post_x"):
+                            skill = await skill_registry.get("post_x")
+                            post_result = await skill.execute(text=draft_text[:280])
+                            posted = True
+                            tweet_id = post_result.get("tweet_id", "")
+                            await update.message.reply_text(
+                                f"Approved & posted!\n\n{draft_text[:200]}\n\nTweet ID: {tweet_id}"
+                            )
+                else:
+                    skill_name = f"post_{platform}"
+                    if await skill_registry.is_available(skill_name):
+                        skill = await skill_registry.get(skill_name)
+                        post_result = await skill.execute(text=draft_text)
+                        posted = True
+                        await update.message.reply_text(f"Approved & posted on {platform}!")
+
             except Exception as exc:
                 logger.error("post_after_approve_failed", error=str(exc))
+                await update.message.reply_text(f"Approved but posting failed: {exc}")
+
+        # Execute post-approval actions (e.g. send follow-up email)
+        if posted and post_actions:
+            await _execute_post_actions(post_actions, post_result, update)
 
         if not posted:
             await update.message.reply_text(f"Approved: {interaction_id}")
         logger.info("interaction_approved", interaction_id=interaction_id)
     except Exception as exc:
         await update.message.reply_text(f"Error: {exc}")
+
+
+async def _execute_post_actions(
+    actions: list[dict],
+    post_result: dict,
+    update: Update,
+) -> None:
+    """Execute follow-up actions after a draft is approved and posted.
+
+    Supports action types:
+    - send_email: Send an email via the send_email skill. Body can contain
+      {thread_url} and {tweet_id} placeholders replaced with actual values.
+
+    Args:
+        actions: List of action dicts from thread_context.
+        post_result: Result dict from posting (contains thread_url, tweet_id, etc.).
+        update: Telegram update for sending status messages.
+    """
+    from skills.registry import skill_registry
+
+    thread_url = post_result.get("thread_url", "")
+    tweet_id = post_result.get("tweet_id", "")
+    # For threads, grab the first tweet ID
+    tweet_ids = post_result.get("thread_tweet_ids", [])
+    if not tweet_id and tweet_ids:
+        tweet_id = tweet_ids[0]
+
+    for action in actions:
+        action_type = action.get("type")
+        try:
+            if action_type == "send_email" and await skill_registry.is_available("send_email"):
+                send_skill = await skill_registry.get("send_email")
+
+                body = action.get("body", "")
+                subject = action.get("subject", "")
+                # Replace placeholders with actual posted URLs
+                body = body.replace("{thread_url}", thread_url)
+                body = body.replace("{tweet_id}", tweet_id)
+                subject = subject.replace("{thread_url}", thread_url)
+
+                await send_skill.execute(
+                    to=action["to"],
+                    subject=subject,
+                    body=body,
+                )
+                await update.message.reply_text(f"Follow-up email sent to {action['to']}")
+                logger.info("post_action_email_sent", to=action["to"])
+            else:
+                logger.warning("post_action_unknown", action_type=action_type)
+        except Exception as exc:
+            logger.warning("post_action_failed", action_type=action_type, error=str(exc))
+            await update.message.reply_text(f"Follow-up action failed ({action_type}): {exc}")
 
 
 async def cmd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
