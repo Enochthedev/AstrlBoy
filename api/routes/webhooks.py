@@ -4,7 +4,8 @@ Inbound webhook routes — Resend email ingestion.
 Resend fires a POST to /webhooks/inbound/email with email metadata
 when someone sends to agent@astrlboy.xyz. The webhook only includes
 metadata (from, to, subject) — we call the Resend API to fetch the
-actual body, then match against job applications and notify Wave.
+actual body, then persist to the inbound_emails table, match against
+job applications, and notify Wave.
 """
 
 import hashlib
@@ -18,6 +19,7 @@ from sqlalchemy import select
 from core.config import settings
 from core.logging import get_logger
 from db.base import async_session_factory
+from db.models.inbound_emails import InboundEmail
 from db.models.job_applications import JobApplication
 
 logger = get_logger("api.webhooks")
@@ -120,10 +122,12 @@ async def inbound_email(request: Request) -> dict:
     # Fetch the actual email body from Resend API (webhook only has metadata)
     text_body, html_body = await _fetch_email_body(email_id) if email_id else ("", "")
 
-    # Try to match this reply to an existing job application
+    # Persist the email so the agent can search through it later
     matched_application = None
+    stored_email_id = None
     try:
         async with async_session_factory() as session:
+            # Match against job applications first
             result = await session.execute(
                 select(JobApplication)
                 .where(JobApplication.email_sent_to == from_email)
@@ -136,15 +140,31 @@ async def inbound_email(request: Request) -> dict:
                 if matched_application.status == "sent":
                     matched_application.status = "replied"
                     matched_application.last_updated = datetime.now(timezone.utc)
-                    await session.commit()
                     logger.info(
                         "job_application_reply_matched",
                         application_id=str(matched_application.id),
                         company=matched_application.company,
                         from_email=from_email,
                     )
+
+            # Store the email in the DB
+            to_addr = to_list[0] if to_list else "agent@astrlboy.xyz"
+            inbound = InboundEmail(
+                resend_email_id=email_id or None,
+                from_email=from_email,
+                to_email=to_addr,
+                subject=subject,
+                text_body=text_body,
+                html_body=html_body,
+                matched_application_id=matched_application.id if matched_application else None,
+            )
+            session.add(inbound)
+            await session.commit()
+            stored_email_id = str(inbound.id)
+
+            logger.info("inbound_email_stored", email_db_id=stored_email_id)
     except Exception as exc:
-        logger.error("inbound_email_match_failed", error=str(exc))
+        logger.error("inbound_email_store_failed", error=str(exc))
 
     # Notify Wave via Telegram
     try:
