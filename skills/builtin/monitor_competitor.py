@@ -12,8 +12,6 @@ from typing import Any
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
-from firecrawl import FirecrawlApp
-
 from core.config import settings
 from core.exceptions import SkillExecutionError
 from core.logging import get_logger
@@ -42,7 +40,7 @@ class MonitorCompetitorSkill(BaseTool):
     version = "1.0.0"
 
     def __init__(self) -> None:
-        self._firecrawl = FirecrawlApp(api_key=settings.firecrawl_api_key)
+        pass
 
     async def execute(
         self,
@@ -69,13 +67,11 @@ class MonitorCompetitorSkill(BaseTool):
         if sections_to_watch is None:
             sections_to_watch = ["pricing", "features", "blog", "jobs"]
 
-        # --- 1. Scrape the competitor ---
+        # --- 1. Scrape the competitor via the scrape skill ---
         try:
-            scrape_result = self._firecrawl.scrape_url(
-                competitor_url,
-                params={"formats": ["markdown"]},
-            )
-            current_markdown = scrape_result.get("markdown", "")
+            from skills.registry import skill_registry
+            scrape_skill = await skill_registry.get("scrape")
+            current_markdown = await scrape_skill.execute(url=competitor_url)
         except Exception as exc:
             logger.error(
                 "competitor_scrape_failed",

@@ -14,6 +14,9 @@ class ApplicationState(TypedDict, total=False):
     scored_postings: list[dict]
     selected: list[dict]
 
+    # Warm outreach — engagement before cold application
+    outreach_results: list[dict]
+
     # Application
     draft_application: str
     cover_note: str

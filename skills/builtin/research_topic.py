@@ -12,7 +12,6 @@ from typing import Any
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
-from firecrawl import FirecrawlApp
 from tavily import TavilyClient
 
 from core.config import settings
@@ -45,7 +44,6 @@ class ResearchTopicSkill(BaseTool):
 
     def __init__(self) -> None:
         self._tavily = TavilyClient(api_key=settings.tavily_api_key)
-        self._firecrawl = FirecrawlApp(api_key=settings.firecrawl_api_key)
 
     async def execute(
         self,
@@ -106,14 +104,12 @@ class ResearchTopicSkill(BaseTool):
         # --- 2. Deep mode: Firecrawl top 3 results for full page content ---
         full_page_content: list[dict[str, Any]] = []
         if depth == "deep":
+            from skills.registry import skill_registry
+            scrape_skill = await skill_registry.get("scrape")
             top_urls = [r["url"] for r in search_results[:3] if r.get("url")]
             for url in top_urls:
                 try:
-                    scrape_result = self._firecrawl.scrape_url(
-                        url,
-                        params={"formats": ["markdown"]},
-                    )
-                    markdown = scrape_result.get("markdown", "")
+                    markdown = await scrape_skill.execute(url=url)
                     if markdown:
                         full_page_content.append({
                             "url": url,

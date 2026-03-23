@@ -86,6 +86,31 @@ class FollowXSkill(BaseTool):
 
         return count
 
+    def _resolve_user_id(self, user_id: str) -> str:
+        """Resolve a username to a numeric user ID if needed.
+
+        The X API requires numeric IDs for follow_user(). Claude sometimes
+        passes usernames instead. This handles both cases.
+
+        Args:
+            user_id: Either a numeric ID or a username (with or without @).
+
+        Returns:
+            The numeric user ID string.
+        """
+        clean = user_id.strip().lstrip("@")
+
+        # Already numeric — return as-is
+        if clean.isdigit():
+            return clean
+
+        # It's a username — look up the ID
+        user = self._client.get_user(username=clean)
+        if user and user.data:
+            return str(user.data.id)
+
+        raise SkillExecutionError(f"User not found: {clean}")
+
     async def execute(
         self,
         user_id: str,
@@ -95,7 +120,7 @@ class FollowXSkill(BaseTool):
         """Follow a user on X.
 
         Args:
-            user_id: The X user ID to follow.
+            user_id: The X user ID or username to follow.
             reason: Why we're following this account (logged, not sent to X).
 
         Returns:
@@ -107,7 +132,9 @@ class FollowXSkill(BaseTool):
         count = await self._check_and_increment_counter()
 
         try:
-            response = self._client.follow_user(target_user_id=user_id)
+            # Resolve username to numeric ID if needed
+            resolved_id = self._resolve_user_id(user_id)
+            response = self._client.follow_user(target_user_id=resolved_id)
             data = response.data or {}
             following = data.get("following", False)
             pending = data.get("pending_follow", False)
@@ -145,7 +172,7 @@ class FollowXSkill(BaseTool):
             "properties": {
                 "user_id": {
                     "type": "string",
-                    "description": "X user ID to follow",
+                    "description": "X user ID or username to follow (e.g. '123456' or 'MentorableHQ')",
                 },
                 "reason": {
                     "type": "string",

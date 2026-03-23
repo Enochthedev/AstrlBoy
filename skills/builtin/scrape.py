@@ -1,13 +1,12 @@
 """
 Firecrawl URL scraper skill.
 
-Scrapes a single URL and returns clean markdown. Use for competitor pages,
-articles, job postings. For crawling entire sites, use the crawl skill instead.
+Scrapes a single URL and returns clean markdown. Handles JS-rendered pages.
+Use for competitor pages, articles, job postings.
+For crawling entire sites, use the crawl skill instead.
 """
 
 from typing import Any
-
-from firecrawl import FirecrawlApp
 
 from core.config import settings
 from core.exceptions import SkillExecutionError
@@ -21,11 +20,19 @@ class ScrapeSkill(BaseTool):
     """Scrape a URL and return clean markdown."""
 
     name = "scrape"
-    description = "Scrape a URL and return clean markdown. Use for competitor pages, articles, job postings."
-    version = "1.0.0"
+    description = "Scrape a URL and return clean markdown. Handles JS-rendered pages. Use for competitor pages, articles, job postings."
+    version = "1.1.0"
 
     def __init__(self) -> None:
-        self._client = FirecrawlApp(api_key=settings.firecrawl_api_key)
+        # Firecrawl v4+ exports Firecrawl class; older versions export FirecrawlApp
+        try:
+            from firecrawl import Firecrawl
+            self._client = Firecrawl(api_key=settings.firecrawl_api_key)
+            self._version = "v2"
+        except ImportError:
+            from firecrawl import FirecrawlApp
+            self._client = FirecrawlApp(api_key=settings.firecrawl_api_key)
+            self._version = "v1"
 
     async def execute(self, url: str, extract_schema: dict | None = None, **kwargs: Any) -> str:
         """Scrape a URL and return markdown content.
@@ -41,18 +48,33 @@ class ScrapeSkill(BaseTool):
             SkillExecutionError: If the scrape fails.
         """
         try:
-            params: dict[str, Any] = {"formats": ["markdown"]}
-            if extract_schema:
-                params["formats"].append("extract")
-                params["extract"] = {"schema": extract_schema}
+            if self._version == "v2":
+                # Firecrawl v4+: scrape(url, formats=[...])
+                formats = ["markdown"]
+                if extract_schema:
+                    formats.append("json")
 
-            # Firecrawl v2 SDK renamed scrape_url → scrape
-            scrape_fn = getattr(self._client, "scrape", None) or self._client.scrape_url
-            result = scrape_fn(url, params=params)
+                result = self._client.scrape(url, formats=formats)
 
-            if extract_schema and result.get("extract"):
-                return result["extract"]
-            return result.get("markdown", "")
+                if extract_schema and hasattr(result, "get"):
+                    return result.get("json", result.get("markdown", ""))
+                if hasattr(result, "markdown"):
+                    return result.markdown or ""
+                if hasattr(result, "get"):
+                    return result.get("markdown", "")
+                return str(result)
+            else:
+                # Firecrawl v1: scrape_url(url, params={...})
+                params: dict[str, Any] = {"formats": ["markdown"]}
+                if extract_schema:
+                    params["formats"].append("extract")
+                    params["extract"] = {"schema": extract_schema}
+
+                result = self._client.scrape_url(url, params=params)
+
+                if extract_schema and result.get("extract"):
+                    return result["extract"]
+                return result.get("markdown", "")
         except Exception as exc:
             logger.error("scrape_failed", url=url, error=str(exc))
             raise SkillExecutionError(f"Scrape failed for {url}: {exc}") from exc

@@ -42,8 +42,14 @@ class ReadEmailSkill(BaseTool):
             List of dicts with 'from', 'subject', 'date', 'body' keys.
 
         Raises:
-            SkillExecutionError: If reading fails.
+            SkillExecutionError: If IMAP is not configured or reading fails.
         """
+        # Skip if IMAP credentials aren't configured — inbound email may be
+        # handled by the Resend webhook instead
+        if not settings.imap_host or not settings.imap_pass:
+            logger.info("read_email_skipped", reason="IMAP not configured, using Resend webhook for inbound")
+            return []
+
         try:
             # IMAP is synchronous — acceptable here since it's called from a scheduled job
             mail = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)

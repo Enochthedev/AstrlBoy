@@ -7,8 +7,6 @@ depth. Returns all pages as markdown. Use for deep competitor analysis.
 
 from typing import Any
 
-from firecrawl import FirecrawlApp
-
 from core.config import settings
 from core.exceptions import SkillExecutionError
 from core.logging import get_logger
@@ -22,10 +20,18 @@ class CrawlSkill(BaseTool):
 
     name = "crawl"
     description = "Crawl a website starting from a URL. Returns all discovered pages as markdown."
-    version = "1.0.0"
+    version = "1.1.0"
 
     def __init__(self) -> None:
-        self._client = FirecrawlApp(api_key=settings.firecrawl_api_key)
+        # Firecrawl v4+ exports Firecrawl class; older versions export FirecrawlApp
+        try:
+            from firecrawl import Firecrawl
+            self._client = Firecrawl(api_key=settings.firecrawl_api_key)
+            self._version = "v2"
+        except ImportError:
+            from firecrawl import FirecrawlApp
+            self._client = FirecrawlApp(api_key=settings.firecrawl_api_key)
+            self._version = "v1"
 
     async def execute(
         self, url: str, max_pages: int = 10, max_depth: int = 2, **kwargs: Any
@@ -44,23 +50,47 @@ class CrawlSkill(BaseTool):
             SkillExecutionError: If the crawl fails.
         """
         try:
-            # Firecrawl v2 SDK renamed crawl_url → crawl
-            crawl_fn = getattr(self._client, "crawl", None) or self._client.crawl_url
-            result = crawl_fn(
-                url,
-                params={
-                    "limit": max_pages,
-                    "maxDepth": max_depth,
-                    "scrapeOptions": {"formats": ["markdown"]},
-                },
-            )
-            pages = []
-            for page in result.get("data", []):
-                pages.append({
-                    "url": page.get("metadata", {}).get("sourceURL", url),
-                    "markdown": page.get("markdown", ""),
-                })
-            return pages
+            if self._version == "v2":
+                # Firecrawl v4+: crawl(url, limit=N, scrape_options={...})
+                result = self._client.crawl(
+                    url,
+                    limit=max_pages,
+                    scrape_options={"formats": ["markdown"]},
+                )
+
+                pages = []
+                # Result may be a list or have a .data attribute
+                data = getattr(result, "data", result) if not isinstance(result, list) else result
+                if isinstance(data, dict):
+                    data = data.get("data", [])
+                for page in (data or []):
+                    page_url = url
+                    page_md = ""
+                    if hasattr(page, "metadata"):
+                        page_url = getattr(page.metadata, "source_url", url) if page.metadata else url
+                        page_md = getattr(page, "markdown", "") or ""
+                    elif isinstance(page, dict):
+                        page_url = page.get("metadata", {}).get("sourceURL", url)
+                        page_md = page.get("markdown", "")
+                    pages.append({"url": page_url, "markdown": page_md})
+                return pages
+            else:
+                # Firecrawl v1: crawl_url(url, params={...})
+                result = self._client.crawl_url(
+                    url,
+                    params={
+                        "limit": max_pages,
+                        "maxDepth": max_depth,
+                        "scrapeOptions": {"formats": ["markdown"]},
+                    },
+                )
+                pages = []
+                for page in result.get("data", []):
+                    pages.append({
+                        "url": page.get("metadata", {}).get("sourceURL", url),
+                        "markdown": page.get("markdown", ""),
+                    })
+                return pages
         except Exception as exc:
             logger.error("crawl_failed", url=url, error=str(exc))
             raise SkillExecutionError(f"Crawl failed for {url}: {exc}") from exc

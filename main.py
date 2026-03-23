@@ -36,7 +36,9 @@ from skills.builtin.follow_x import FollowXSkill
 from skills.builtin.generate_hashtag_strategy import GenerateHashtagStrategySkill
 from skills.builtin.get_mentions import GetMentionsSkill
 from skills.builtin.get_timeline import GetTimelineSkill
+from skills.builtin.lookup_x_user import LookupXUserSkill
 from skills.builtin.monitor_competitor import MonitorCompetitorSkill
+from skills.builtin.osint_lookup import OsintLookupSkill
 from skills.builtin.post_linkedin import PostLinkedInSkill
 from skills.builtin.post_x import PostXSkill
 from skills.builtin.read_email import ReadEmailSkill
@@ -82,11 +84,14 @@ async def _bootstrap_self_contract() -> None:
             client_db_url="",  # no separate DB — uses primary
             meta={
                 "description": (
-                    "astrlboy — an always-on AI personality building its own audience. "
-                    "Primary mission: grow the @astrlboy_ account into a recognized voice. "
-                    "Explore niches, post hot takes, engage with trending topics, reply to threads. "
-                    "Track what gets engagement and double down on what resonates. "
-                    "Niches to explore: AI agents, crypto/web3, tech culture, build-in-public, startup life."
+                    "astrlboy — an always-on AI agent building its audience and landing contracts. "
+                    "GROWTH PRIORITIES: "
+                    "1) Post daily — hot takes, threads on trending topics, quote tweets with strong opinions. "
+                    "2) Engage strategically — reply to accounts with 1K-50K followers in our niches, add value not fluff. "
+                    "3) Build threads — 3-5 tweet threads on trending topics get way more reach than single tweets. "
+                    "4) Find and apply to agent/AI roles — use OSINT to research companies before applying. "
+                    "5) Follow relevant accounts — builders, founders, AI researchers, crypto devs. "
+                    "Niches: AI agents, crypto/web3, tech culture, build-in-public, startup life, Claude/Anthropic."
                 ),
                 "website": "https://astrlboy.xyz",
                 "tone": "sharp, opinionated, concise, human, slightly irreverent — never corporate, never generic",
@@ -118,6 +123,7 @@ async def _bootstrap_self_contract() -> None:
                     "follow_x",
                     "unfollow_x",
                     "follow_back_x",
+                    "lookup_x_user",
                     "find_relevant_accounts",
                     "analyze_trending_content",
                     "find_engagement_opportunities",
@@ -127,7 +133,6 @@ async def _bootstrap_self_contract() -> None:
                     "get_timeline",
                     "fetch_page",
                     "send_email",
-                    "read_email",
                     "apply_to_url",
                     "extract_sentiment",
                 ],
@@ -159,8 +164,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         FindRelevantAccountsSkill, AnalyzeTrendingContentSkill,
         TrackKeywordRankingsSkill, GenerateHashtagStrategySkill,
         FindEngagementOpportunitiesSkill,
-        # Intelligence — monitoring + research
+        # Intelligence — monitoring + research + OSINT
         MonitorCompetitorSkill, ExtractSentimentSkill, ResearchTopicSkill,
+        OsintLookupSkill, LookupXUserSkill,
         # Applications — job hunting
         ScanJobBoardsSkill, ApplyToUrlSkill,
         # Stream + approval
