@@ -67,7 +67,7 @@ class SendEmailSkill(BaseTool):
                 port=settings.smtp_port,
                 username=settings.smtp_user,
                 password=settings.smtp_pass,
-                use_tls=True,
+                start_tls=True,
             )
 
             logger.info("email_sent", to=to, subject=subject)
