@@ -15,10 +15,15 @@ from core.logging import get_logger
 
 logger = get_logger("cache.redis")
 
-# Singleton async Redis connection
+# Singleton async Redis connection with proper timeouts.
+# Without explicit timeouts, a network hiccup between Railway and Upstash
+# causes the connection to hang indefinitely and kill the entire job.
 redis_client: redis.Redis = redis.from_url(
     settings.redis_url,
     decode_responses=True,
+    socket_timeout=10,          # 10s timeout for individual commands
+    socket_connect_timeout=10,  # 10s timeout for establishing connection
+    retry_on_timeout=True,      # Auto-retry once on timeout
 ) if settings.redis_url else None  # type: ignore[assignment]
 
 
@@ -48,12 +53,21 @@ async def redis_lock(
         yield True
         return
 
-    lock = redis_client.lock(
-        f"astrlboy:lock:{name}",
-        timeout=timeout,
-        blocking_timeout=blocking_timeout,
-    )
-    acquired = await lock.acquire(blocking=False)
+    lock = None
+    try:
+        lock = redis_client.lock(
+            f"astrlboy:lock:{name}",
+            timeout=timeout,
+            blocking_timeout=blocking_timeout,
+        )
+        acquired = await lock.acquire(blocking=False)
+    except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError, OSError) as exc:
+        # Redis is unreachable — run anyway rather than skipping the entire job.
+        # The lock exists to prevent double execution, but a missed job is worse
+        # than a rare double execution.
+        logger.warning("redis_lock_unavailable", lock_name=name, error=str(exc))
+        yield True
+        return
 
     if not acquired:
         logger.info("lock_already_held", lock_name=name)
@@ -70,6 +84,9 @@ async def redis_lock(
         except redis.exceptions.LockNotOwnedError:
             # Lock expired before we released — harmless
             logger.warning("lock_expired_before_release", lock_name=name)
+        except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError, OSError):
+            # Redis went away during the job — lock will auto-expire
+            logger.warning("redis_lock_release_failed", lock_name=name)
 
 
 async def close_redis() -> None:

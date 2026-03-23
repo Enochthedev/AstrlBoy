@@ -213,7 +213,11 @@ async def run_mentions_job() -> None:
             # Fetch since_id from Redis to skip already-processed mentions
             since_id = None
             if redis_client:
-                since_id = await redis_client.get("astrlboy:mentions:since_id")
+                try:
+                    since_id = await redis_client.get("astrlboy:mentions:since_id")
+                except Exception:
+                    # Redis unavailable — run without since_id, may re-process some mentions
+                    logger.warning("redis_since_id_fetch_failed")
 
             mentions = await mentions_skill.execute(
                 max_results=10,
@@ -314,7 +318,10 @@ async def run_mentions_job() -> None:
 
             # Persist highest ID so next run skips these
             if redis_client:
-                await redis_client.set("astrlboy:mentions:since_id", highest_id)
+                try:
+                    await redis_client.set("astrlboy:mentions:since_id", highest_id)
+                except Exception:
+                    logger.warning("redis_since_id_save_failed")
 
         except Exception as exc:
             logger.error("mentions_job_failed", error=str(exc))
@@ -386,35 +393,36 @@ async def run_follow_back_job() -> None:
             redis_names_key = "astrlboy:follower_names"
 
             if redis_client:
-                stored_ids_raw = await redis_client.smembers(redis_key)
-                stored_ids = {s if isinstance(s, str) else s.decode() for s in stored_ids_raw} if stored_ids_raw else set()
+                try:
+                    stored_ids_raw = await redis_client.smembers(redis_key)
+                    stored_ids = {s if isinstance(s, str) else s.decode() for s in stored_ids_raw} if stored_ids_raw else set()
 
-                # Load stored usernames for unfollower display
-                stored_names: dict[str, str] = {}
-                if stored_ids:
-                    for uid in stored_ids:
-                        name = await redis_client.hget(redis_names_key, uid)
-                        if name:
-                            stored_names[uid] = name if isinstance(name, str) else name.decode()
+                    # Load stored usernames for unfollower display
+                    stored_names: dict[str, str] = {}
+                    if stored_ids:
+                        for uid in stored_ids:
+                            name = await redis_client.hget(redis_names_key, uid)
+                            if name:
+                                stored_names[uid] = name if isinstance(name, str) else name.decode()
 
-                if stored_ids:
-                    new_followers = list(current_ids - stored_ids)
-                    unfollower_ids = list(stored_ids - current_ids)
-                    unfollowers = [
-                        stored_names.get(uid, uid) for uid in unfollower_ids
-                    ]
+                    if stored_ids:
+                        new_followers = list(current_ids - stored_ids)
+                        unfollower_ids = list(stored_ids - current_ids)
+                        unfollowers = [
+                            stored_names.get(uid, uid) for uid in unfollower_ids
+                        ]
 
-                # Update stored set with current followers
-                if current_ids:
-                    # Replace the entire set
-                    await redis_client.delete(redis_key)
-                    await redis_client.sadd(redis_key, *current_ids)
-                    # Update username mapping
-                    for uid, uname in current_followers.items():
-                        await redis_client.hset(redis_names_key, uid, uname)
-                    # Clean up usernames for unfollowed users
-                    for uid in (stored_ids - current_ids):
-                        await redis_client.hdel(redis_names_key, uid)
+                    # Update stored set with current followers
+                    if current_ids:
+                        await redis_client.delete(redis_key)
+                        await redis_client.sadd(redis_key, *current_ids)
+                        for uid, uname in current_followers.items():
+                            await redis_client.hset(redis_names_key, uid, uname)
+                        for uid in (stored_ids - current_ids):
+                            await redis_client.hdel(redis_names_key, uid)
+                except Exception as exc:
+                    # Redis unavailable — skip follower tracking, still do follow-backs
+                    logger.warning("redis_follower_tracking_failed", error=str(exc))
 
             # Step 3: Run the follow-back skill for new followers
             follow_back_skill = await skill_registry.get("follow_back_x")
