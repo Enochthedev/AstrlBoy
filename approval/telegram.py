@@ -423,12 +423,19 @@ async def cmd_trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
 
         lines = []
-        for r in results:
-            title = r.get("title", "")[:80]
-            snippet = r.get("content", "")[:100]
-            lines.append(f"{title}\n{snippet}...")
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "No title")[:80]
+            url = r.get("url", "")
+            # Strip markdown artifacts from Tavily content for clean display
+            raw = r.get("content", "")
+            snippet = raw.replace("#", "").replace("*", "").replace("🚀", "").strip()
+            # Truncate to last complete sentence within 120 chars
+            if len(snippet) > 120:
+                cut = snippet[:120].rfind(".")
+                snippet = snippet[: cut + 1] if cut > 40 else snippet[:120] + "…"
+            lines.append(f"{i}. {title}\n{snippet}\n{url}")
 
-        await update.message.reply_text("\n---\n".join(lines))
+        await update.message.reply_text("\n\n".join(lines))
     except Exception as exc:
         await update.message.reply_text(f"Error: {exc}")
 

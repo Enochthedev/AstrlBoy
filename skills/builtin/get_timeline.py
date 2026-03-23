@@ -9,6 +9,7 @@ from typing import Any
 
 import tweepy
 
+from cache.x_identity import get_x_user_id
 from core.config import settings
 from core.exceptions import SkillExecutionError
 from core.logging import get_logger
@@ -50,18 +51,28 @@ class GetTimelineSkill(BaseTool):
             SkillExecutionError: If the API call fails.
         """
         try:
-            me = self._client.get_me()
-            if not me or not me.data:
-                raise SkillExecutionError("Could not get authenticated user")
+            # Use cached identity — saves $0.01 per call vs get_me()
+            user_id = await get_x_user_id()
+            if not user_id:
+                raise SkillExecutionError("Could not get authenticated user ID")
 
             response = self._client.get_users_tweets(
-                id=me.data.id,
+                id=user_id,
                 max_results=max(5, min(max_results, 100)),
                 tweet_fields=["created_at", "text"],
             )
 
             if not response or not response.data:
                 return []
+
+            # Track read cost — each tweet returned costs $0.005
+            try:
+                from core.budget import XOperation, budget_tracker
+                if budget_tracker:
+                    for _ in response.data:
+                        await budget_tracker.track(XOperation.POST_READ)
+            except Exception:
+                pass
 
             tweets = []
             for tweet in response.data:
