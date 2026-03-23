@@ -6,11 +6,16 @@ Key naming: {contract_slug}/{yyyy}/{mm}/{dd}/{entity_type}/{uuid}.json
 """
 
 import json
+import urllib3
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 import boto3
+from botocore.config import Config as BotoConfig
+
+# R2 uses Cloudflare-issued certs that boto3 can't verify in some environments
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from core.config import settings
 from core.exceptions import ExternalAPIError
@@ -33,6 +38,11 @@ class R2Client:
             aws_access_key_id=settings.r2_access_key_id,
             aws_secret_access_key=settings.r2_secret_access_key,
             region_name="auto",
+            config=BotoConfig(
+                signature_version="s3v4",
+                retries={"max_attempts": 3, "mode": "adaptive"},
+            ),
+            verify=False,
         )
         self._bucket = settings.r2_bucket_name
 
