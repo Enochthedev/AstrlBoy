@@ -11,6 +11,7 @@ from typing import Any
 import tweepy
 
 from cache.redis import redis_client
+from core.budget import XOperation, budget_tracker
 from core.config import settings
 from core.exceptions import SkillExecutionError
 from core.logging import get_logger
@@ -110,6 +111,10 @@ class FollowXSkill(BaseTool):
             data = response.data or {}
             following = data.get("following", False)
             pending = data.get("pending_follow", False)
+
+            # Track the cost ($0.015 per follow)
+            if budget_tracker:
+                await budget_tracker.track(XOperation.USER_INTERACTION)
 
             logger.info(
                 "user_followed",

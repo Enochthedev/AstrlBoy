@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     agent_handle: str = "@astrlboy_"
     log_level: str = "INFO"
 
+    # Budget — X API cost controls
+    x_daily_tweet_cap: int = 15          # max tweets (posts + replies) per day
+    x_monthly_budget_cents: int = 500    # monthly X API budget in cents ($5.00 default)
+    x_follower_page_cap: int = 3         # max pagination pages when fetching followers (3 × 100 = 300)
+
 
 # Singleton — import this everywhere
 settings = Settings()  # type: ignore[call-arg]

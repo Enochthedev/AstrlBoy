@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from anthropic import AsyncAnthropic
 from sqlalchemy import select, update
 
+from core.budget import XOperation, budget_tracker
 from core.config import settings
 from core.logging import get_logger
 from db.base import async_session_factory
@@ -71,6 +72,9 @@ async def collect_performance_metrics() -> int:
                 tweet_fields=["public_metrics"],
             )
             if tweet and tweet.data:
+                # Track the read cost ($0.005 per tweet lookup)
+                if budget_tracker:
+                    await budget_tracker.track(XOperation.POST_READ)
                 metrics = tweet.data.get("public_metrics", {})
                 likes = metrics.get("like_count", 0)
                 retweets = metrics.get("retweet_count", 0)

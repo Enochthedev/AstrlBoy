@@ -15,6 +15,7 @@ from typing import Any
 
 import tweepy
 
+from core.budget import XOperation, budget_tracker
 from core.config import settings
 from core.exceptions import SkillExecutionError
 from core.logging import get_logger
@@ -133,6 +134,11 @@ class ReplyXSkill(BaseTool):
                             conversation_id=str(conversation_id),
                             error=str(thread_exc),
                         )
+
+                # Track read costs — 1 tweet + thread tweets
+                if budget_tracker:
+                    read_count = 1 + len(thread_tweets)
+                    await budget_tracker.track(XOperation.POST_READ, count=read_count)
 
                 context = {
                     "original_tweet": {

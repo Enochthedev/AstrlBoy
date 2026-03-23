@@ -15,7 +15,9 @@ from fastapi import FastAPI
 from api.router import api_router
 from approval.telegram import create_telegram_app
 from cache.redis import close_redis
+from cache.x_identity import warm_cache as warm_x_identity
 from contracts.service import contracts_service
+from core.budget import init_budget
 from core.config import settings
 from core.logging import get_logger, setup_logging
 from db.base import close_engine
@@ -186,6 +188,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await contracts_service.load_registry()
     except Exception as exc:
         logger.warning("registry_load_failed", error=str(exc))
+
+    # Initialize X API budget tracker — enforces daily tweet cap and monthly budget
+    init_budget(
+        daily_tweet_cap=settings.x_daily_tweet_cap,
+        monthly_budget_cents=settings.x_monthly_budget_cents,
+    )
+
+    # Warm the X identity cache — one get_me() call now saves ~$4.50/month
+    try:
+        await warm_x_identity()
+    except Exception as exc:
+        logger.warning("x_identity_warm_failed", error=str(exc))
 
     # Start scheduler
     _scheduler = create_scheduler()

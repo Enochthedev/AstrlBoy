@@ -2,12 +2,15 @@
 X mentions skill.
 
 Fetches recent mentions of @astrlboy_ so the agent can read context and reply.
+Uses cached identity to avoid paying $0.01 per get_me() call.
 """
 
 from typing import Any
 
 import tweepy
 
+from cache.x_identity import get_x_user_id
+from core.budget import XOperation, budget_tracker
 from core.config import settings
 from core.exceptions import SkillExecutionError
 from core.logging import get_logger
@@ -21,7 +24,7 @@ class GetMentionsSkill(BaseTool):
 
     name = "get_mentions"
     description = "Get recent tweets mentioning @astrlboy_. Returns tweet text, author, and context."
-    version = "1.0.0"
+    version = "1.1.0"
 
     def __init__(self) -> None:
         self._client = tweepy.Client(
@@ -51,13 +54,11 @@ class GetMentionsSkill(BaseTool):
             SkillExecutionError: If the API call fails.
         """
         try:
-            # Get the authenticated user's ID
-            me = self._client.get_me()
-            if not me or not me.data:
-                raise SkillExecutionError("Could not get authenticated user")
+            # Use cached identity instead of calling get_me() ($0.01 saved per call)
+            user_id = await get_x_user_id()
 
             response = self._client.get_users_mentions(
-                id=me.data.id,
+                id=user_id,
                 since_id=since_id,
                 max_results=max(5, min(max_results, 100)),
                 tweet_fields=["created_at", "conversation_id", "in_reply_to_user_id", "text"],
@@ -66,6 +67,10 @@ class GetMentionsSkill(BaseTool):
 
             if not response or not response.data:
                 return []
+
+            # Track read cost
+            if budget_tracker:
+                await budget_tracker.track(XOperation.POST_READ, count=len(response.data))
 
             # Build author lookup
             authors = {}
@@ -81,6 +86,7 @@ class GetMentionsSkill(BaseTool):
                     "author_id": str(tweet.author_id),
                     "author_username": authors.get(tweet.author_id, "unknown"),
                     "conversation_id": str(tweet.conversation_id) if tweet.conversation_id else None,
+                    "in_reply_to_user_id": str(tweet.in_reply_to_user_id) if tweet.in_reply_to_user_id else None,
                     "created_at": str(tweet.created_at) if tweet.created_at else None,
                 })
 

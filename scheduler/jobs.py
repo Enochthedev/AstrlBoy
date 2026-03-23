@@ -177,13 +177,12 @@ If it's genuinely hostile or not worth engaging, just say "SKIP"."""
 
 
 async def run_mentions_job() -> None:
-    """Check for mentions of @astrlboy_ and reply with classification.
+    """Check for mentions of @astrlboy_ and reply with classification + budget awareness.
 
-    Each mention is classified before replying:
-    - relevant: genuine engagement → reply thoughtfully
-    - ask_ai: treating astrlboy like Grok/ChatGPT → dismiss with personality
-    - spam: bots/scams → ignore
-    - troll: hostile/bait → ignore or sharp one-liner
+    Priority system:
+    1. Replies to our own tweets → always reply (bypass_cap=True)
+    2. Relevant mentions → reply if within daily tweet cap
+    3. ask_ai/troll → only reply if budget is comfortable
 
     Tracks the last processed mention ID in Redis to avoid re-replying.
     """
@@ -198,6 +197,8 @@ async def run_mentions_job() -> None:
             from anthropic import AsyncAnthropic
 
             from cache.redis import redis_client
+            from cache.x_identity import get_x_user_id
+            from core.budget import budget_tracker
             from core.config import settings
             from skills.registry import skill_registry
 
@@ -210,13 +211,15 @@ async def run_mentions_job() -> None:
             post_skill = await skill_registry.get("post_x")
             _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
+            # Get our user ID for detecting replies to our own tweets
+            our_user_id = await get_x_user_id()
+
             # Fetch since_id from Redis to skip already-processed mentions
             since_id = None
             if redis_client:
                 try:
                     since_id = await redis_client.get("astrlboy:mentions:since_id")
                 except Exception:
-                    # Redis unavailable — run without since_id, may re-process some mentions
                     logger.warning("redis_since_id_fetch_failed")
 
             mentions = await mentions_skill.execute(
@@ -230,9 +233,70 @@ async def run_mentions_job() -> None:
             # Track highest mention ID to skip next run
             highest_id = max(m["id"] for m in mentions)
 
+            # Separate mentions into priority tiers:
+            # Tier 1: replies to our own tweets (always respond)
+            # Tier 2: everything else (budget-capped)
+            own_tweet_replies = []
+            other_mentions = []
             for m in mentions[:5]:
+                if m.get("in_reply_to_user_id") == our_user_id:
+                    own_tweet_replies.append(m)
+                else:
+                    other_mentions.append(m)
+
+            logger.info(
+                "mentions_prioritized",
+                own_tweet_replies=len(own_tweet_replies),
+                other_mentions=len(other_mentions),
+            )
+
+            # Process own-tweet replies first — always reply, bypass cap
+            for m in own_tweet_replies:
                 try:
-                    # Step 1: Classify the mention before deciding how to respond
+                    response = await _client.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=280,
+                        system=(
+                            "You are astrlboy, an autonomous AI agent on X. Someone replied to YOUR tweet. "
+                            "This is a conversation on your own content — engage genuinely. "
+                            "Be sharp, concise, human. Max 280 chars."
+                        ),
+                        messages=[{"role": "user", "content": f"@{m['author_username']} replied to your tweet: {m['text']}"}],
+                    )
+                    reply_text = response.content[0].text[:280]
+
+                    if settings.agent_auto:
+                        await post_skill.execute(
+                            text=reply_text,
+                            reply_to_id=m["id"],
+                            bypass_cap=True,
+                        )
+                        logger.info(
+                            "own_tweet_reply_posted",
+                            mention_id=m["id"],
+                            author=m["author_username"],
+                        )
+                    else:
+                        if await skill_registry.is_available("draft_approval"):
+                            approval_skill = await skill_registry.get("draft_approval")
+                            await approval_skill.execute(
+                                draft=reply_text,
+                                platform="x",
+                                contract_slug="astrlboy",
+                                title=f"[own_thread] Reply to @{m['author_username']}",
+                            )
+                except Exception as exc:
+                    logger.warning("own_tweet_reply_failed", mention_id=m["id"], error=str(exc))
+
+            # Process other mentions — respect daily tweet cap
+            for m in other_mentions:
+                # Check budget before spending Claude tokens on classification
+                if budget_tracker and not await budget_tracker.check_tweet_budget():
+                    logger.info("mentions_budget_exhausted", remaining=len(other_mentions))
+                    break
+
+                try:
+                    # Step 1: Classify the mention
                     classify_resp = await _client.messages.create(
                         model="claude-haiku-4-5",
                         max_tokens=100,
@@ -255,7 +319,6 @@ async def run_mentions_job() -> None:
 
                     # Step 2: Route based on category
                     if category == "spam":
-                        # Don't waste API calls or attention on spam
                         continue
 
                     if category == "troll":
@@ -271,7 +334,6 @@ async def run_mentions_job() -> None:
                         reply_text = reply_text[:280]
 
                     elif category == "ask_ai":
-                        # Dismiss with personality — they're treating us like Grok
                         dismiss_resp = await _client.messages.create(
                             model="claude-haiku-4-5",
                             max_tokens=200,
@@ -281,9 +343,8 @@ async def run_mentions_job() -> None:
                         reply_text = dismiss_resp.content[0].text.strip()[:280]
 
                     else:
-                        # Relevant mention — engage genuinely
                         response = await _client.messages.create(
-                            model="claude-sonnet-4-6",
+                            model="claude-haiku-4-5",
                             max_tokens=280,
                             system=(
                                 "You are astrlboy, an autonomous AI agent on X. You work as a freelance "
@@ -354,7 +415,11 @@ async def run_follow_back_job() -> None:
             if not await skill_registry.is_available("follow_back_x"):
                 return
 
+            from cache.x_identity import get_x_user_id
+            from core.budget import XOperation, budget_tracker
+
             # Step 1: Fetch current follower IDs from X API
+            # Uses cached identity to avoid a $0.01 get_me() call
             client = tweepy.Client(
                 bearer_token=settings.twitter_bearer_token,
                 consumer_key=settings.twitter_api_key,
@@ -362,17 +427,16 @@ async def run_follow_back_job() -> None:
                 access_token=settings.twitter_access_token,
                 access_token_secret=settings.twitter_access_secret,
             )
-            me = client.get_me()
-            if not me or not me.data:
-                logger.error("follow_back_job_failed", error="Could not get authenticated user")
-                return
+            user_id = await get_x_user_id()
 
-            # Fetch up to 1000 followers (paginated) for tracking
+            # Fetch followers with pagination capped to save on API costs.
+            # Default 3 pages × 100 = 300 followers (configurable via x_follower_page_cap).
+            page_cap = settings.x_follower_page_cap
             current_followers: dict[str, str] = {}  # user_id -> username
             pagination_token = None
-            for _ in range(10):  # Max 10 pages of 100 = 1000 followers
+            for _ in range(page_cap):
                 resp = client.get_users_followers(
-                    id=me.data.id,
+                    id=user_id,
                     max_results=100,
                     user_fields=["username"],
                     pagination_token=pagination_token,
@@ -380,6 +444,9 @@ async def run_follow_back_job() -> None:
                 if resp.data:
                     for user in resp.data:
                         current_followers[str(user.id)] = user.username
+                    # Track the read cost
+                    if budget_tracker:
+                        await budget_tracker.track(XOperation.USER_LOOKUP, count=len(resp.data))
                 if not resp.meta or "next_token" not in resp.meta:
                     break
                 pagination_token = resp.meta["next_token"]
@@ -635,9 +702,9 @@ def create_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         run_mentions_job,
-        CronTrigger(hour="*/2", minute=30, timezone=tz),
+        CronTrigger(hour="*/6", minute=30, timezone=tz),
         id="mentions_job",
-        name="Mention check + reply — Every 2 hours",
+        name="Mention check + reply — Every 6 hours",
     )
 
     scheduler.add_job(

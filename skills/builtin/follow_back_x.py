@@ -17,6 +17,8 @@ from typing import Any
 import tweepy
 from anthropic import AsyncAnthropic
 
+from cache.x_identity import get_x_user_id
+from core.budget import XOperation, budget_tracker
 from core.config import settings
 from core.exceptions import SkillExecutionError
 from core.logging import get_logger
@@ -87,19 +89,16 @@ class FollowBackXSkill(BaseTool):
         self._follow_skill = FollowXSkill()
 
     async def _get_authenticated_user_id(self) -> str:
-        """Get the authenticated user's X ID.
+        """Get the authenticated user's X ID from cache (no API call).
 
         Returns:
             The user ID string for @astrlboy_.
 
         Raises:
-            SkillExecutionError: If the API call fails.
+            SkillExecutionError: If the cached identity is unavailable.
         """
         try:
-            me = self._client.get_me()
-            if me.data is None:
-                raise SkillExecutionError("Could not retrieve authenticated user")
-            return str(me.data.id)
+            return await get_x_user_id()
         except Exception as exc:
             raise SkillExecutionError(
                 f"Failed to get authenticated user: {exc}"
@@ -127,7 +126,9 @@ class FollowBackXSkill(BaseTool):
         followers: list[dict[str, Any]] = []
 
         try:
-            # Fetch followers with profile fields for scoring
+            # Fetch followers with profile fields for scoring.
+            # Capped to first page only — deeper pagination is expensive
+            # ($0.01/user) and rarely needed for follow-back decisions.
             response = self._client.get_users_followers(
                 id=user_id,
                 max_results=100,
@@ -139,6 +140,10 @@ class FollowBackXSkill(BaseTool):
                     "verified",
                 ],
             )
+
+            # Track the read cost
+            if budget_tracker and response.data:
+                await budget_tracker.track(XOperation.USER_LOOKUP, count=len(response.data))
 
             if response.data is None:
                 return []
