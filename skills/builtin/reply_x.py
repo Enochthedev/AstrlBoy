@@ -48,8 +48,11 @@ class ReplyXSkill(BaseTool):
     version = "1.0.0"
 
     def __init__(self) -> None:
-        # OAuth 1.0a client for posting (user context)
+        # Bearer token for reads (get_tweet, search) + OAuth 1.0a for writes (create_tweet).
+        # Without bearer_token, tweepy uses OAuth 1.0a for reads too — which 401s
+        # if the user token doesn't have read scope on the current API tier.
         self._client = tweepy.Client(
+            bearer_token=settings.twitter_bearer_token,
             consumer_key=settings.twitter_api_key,
             consumer_secret=settings.twitter_api_secret,
             access_token=settings.twitter_access_token,
