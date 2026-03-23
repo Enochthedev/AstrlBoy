@@ -7,6 +7,8 @@ and monitor contracts, content, trends, and escalations.
 
 import json
 import re
+import time
+from collections import deque
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -816,8 +818,46 @@ async def cmd_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Error: {exc}")
 
 
+# ── Conversation history ──────────────────────────────────────────
+
+# Per-chat rolling conversation history passed to the autonomous agent.
+# Keeps the last 20 messages (10 turns) so the agent remembers what it
+# said and did earlier in the same Telegram session.
+# Entries expire after 2 hours of inactivity.
+_HISTORY_MAX_MESSAGES = 20  # 10 user + 10 assistant
+_HISTORY_TTL_SECONDS = 7200  # 2 hours
+
+# {chat_id: {"messages": deque[dict], "last_ts": float}}
+_chat_history: dict[str, dict] = {}
+
+
+def _get_history(chat_id: str) -> list[dict]:
+    """Return the conversation history for a chat, pruning expired entries."""
+    entry = _chat_history.get(chat_id)
+    if not entry:
+        return []
+    if time.time() - entry["last_ts"] > _HISTORY_TTL_SECONDS:
+        del _chat_history[chat_id]
+        return []
+    return list(entry["messages"])
+
+
+def _append_history(chat_id: str, role: str, content: str) -> None:
+    """Append a message to the chat history."""
+    if chat_id not in _chat_history:
+        _chat_history[chat_id] = {
+            "messages": deque(maxlen=_HISTORY_MAX_MESSAGES),
+            "last_ts": time.time(),
+        }
+    _chat_history[chat_id]["messages"].append({"role": role, "content": content})
+    _chat_history[chat_id]["last_ts"] = time.time()
+
+
 async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle free-form text messages using the autonomous agent.
+
+    Passes rolling conversation history to the agent so it remembers
+    what it said and did earlier in the same Telegram session.
 
     The autonomous agent has access to ALL registered skills as tools.
     Claude decides which tools to call based on the instruction.
@@ -836,6 +876,7 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not user_text:
         return
 
+    chat_id = str(update.effective_chat.id)
     await update.message.reply_text("On it...")
 
     try:
@@ -852,10 +893,15 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
 
+        # Retrieve conversation history so the agent remembers prior turns
+        prior_messages = _get_history(chat_id)
+        _append_history(chat_id, "user", user_text)
+
         # Run the autonomous agent with all skills available
         agent_result = await run_autonomous(
             task=user_text,
             contract=contract,
+            prior_messages=prior_messages,
         )
 
         # Clean markdown artifacts — agent should write plain text for Telegram
@@ -877,6 +923,9 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             tool_summary = f"\n\n[{agent_result.turns} turns | tools: {', '.join(tools_used)}]"
 
         full_response = response_text.strip() + tool_summary
+
+        # Store agent response in history (without tool summary — that's display-only)
+        _append_history(chat_id, "assistant", response_text.strip())
 
         # Telegram max message length is 4096
         if len(full_response) <= 4096:

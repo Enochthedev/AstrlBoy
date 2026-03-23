@@ -68,11 +68,57 @@ def _skills_to_tools(skills: list[BaseTool]) -> list[dict]:
     return tools
 
 
+async def _build_recent_state() -> str:
+    """Inject recent agent state into the system prompt.
+
+    Shows the last few pending approvals and recently posted interactions
+    so the agent is aware of what it just did — even if those actions
+    happened outside the agent's own turns (e.g. cmd_approve posting a thread).
+
+    Returns:
+        A formatted context string, or empty string if DB is unavailable.
+    """
+    try:
+        from sqlalchemy import select
+
+        from db.base import async_session_factory
+        from db.models.interactions import Interaction
+
+        async with async_session_factory() as session:
+            # Last 5 interactions ordered by most recent
+            result = await session.execute(
+                select(Interaction)
+                .order_by(Interaction.created_at.desc())
+                .limit(5)
+            )
+            interactions = result.scalars().all()
+
+        if not interactions:
+            return ""
+
+        lines = []
+        for ix in interactions:
+            preview = (ix.draft or "")[:120].replace("\n", " ")
+            ctx_preview = (ix.thread_context or "")[:80].replace("\n", " ")
+            # Strip the POST_ACTIONS blob from display
+            if "---POST_ACTIONS---" in ctx_preview:
+                ctx_preview = ctx_preview.split("---POST_ACTIONS---")[0].strip()
+            posted = f" | posted: {ix.posted_at.strftime('%H:%M')}" if ix.posted_at else ""
+            lines.append(
+                f"  [{ix.status}] [{ix.platform}] {ctx_preview or preview[:80]}{posted}"
+            )
+
+        return "\nRECENT INTERACTIONS (context for what you just did):\n" + "\n".join(lines) + "\n"
+
+    except Exception:
+        return ""
+
+
 async def _build_system_prompt(contract: Contract | None = None) -> str:
     """Build the system prompt for the autonomous agent.
 
-    Includes identity, rules, contract context, and learned playbook
-    from past performance data.
+    Includes identity, rules, contract context, learned playbook,
+    and recent interaction state so the agent remembers what it just did.
 
     Args:
         contract: Optional contract for client-specific context.
@@ -145,7 +191,10 @@ async def _build_system_prompt(contract: Contract | None = None) -> str:
     except Exception:
         pass
 
-    return base + mode_note + contract_context + playbook
+    # Inject recent interaction state so the agent knows what it just did
+    recent_state = await _build_recent_state()
+
+    return base + mode_note + contract_context + playbook + recent_state
 
 
 async def _get_available_skills(contract: Contract | None = None) -> list[BaseTool]:
@@ -181,6 +230,7 @@ async def run_autonomous(
     system_prompt: str | None = None,
     max_turns: int = 15,
     model: str = "claude-sonnet-4-6",
+    prior_messages: list[dict] | None = None,
 ) -> AgentResult:
     """Run the autonomous agent on a task.
 
@@ -194,6 +244,9 @@ async def run_autonomous(
         system_prompt: Override the default system prompt.
         max_turns: Maximum tool-calling rounds before stopping.
         model: Claude model to use.
+        prior_messages: Optional conversation history to prepend, giving the
+            agent context from previous turns in the same Telegram session.
+            Each entry is {"role": "user"|"assistant", "content": str}.
 
     Returns:
         AgentResult with the final text, tool call log, and metadata.
@@ -231,7 +284,8 @@ async def run_autonomous(
         return AgentResult(text="No skills available.", turns=0)
 
     system = system_prompt or await _build_system_prompt(contract)
-    messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
+    # Prepend conversation history so the agent remembers prior turns
+    messages: list[dict[str, Any]] = list(prior_messages or []) + [{"role": "user", "content": task}]
     all_tool_calls: list[dict] = []
 
     logger.info(
