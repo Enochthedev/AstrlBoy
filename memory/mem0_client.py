@@ -39,9 +39,10 @@ class AgentMemory:
             RuntimeError: If MEM0_API_KEY is not configured.
         """
         if self._client is None:
-            if not settings.mem0_api_key:
+            key = settings.mem0_api_key
+            if not key:
                 raise RuntimeError("MEM0_API_KEY not configured — cannot use long-term memory")
-            self._client = AsyncMemoryClient(api_key=settings.mem0_api_key)
+            self._client = AsyncMemoryClient(api_key=key)  # noqa: S106
         return self._client
 
     @property
