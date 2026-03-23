@@ -60,6 +60,9 @@ class Settings(BaseSettings):
 
     agent_email: str = "agent@astrlboy.xyz"
 
+    # Resend inbound webhook
+    resend_webhook_secret: str = ""   # svix signing secret from Resend dashboard
+
     # Telegram
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
