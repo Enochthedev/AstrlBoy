@@ -25,25 +25,34 @@ from skills.builtin.follow_x import FollowXSkill
 
 logger = get_logger("skills.follow_back_x")
 
-# Minimum relevance score to follow back — set at 6/10 so we're selective
-# but not so strict that we miss good connections.
-MIN_FOLLOWBACK_SCORE = 6
+# Minimum relevance score to follow back — set high because we only want
+# to follow people who genuinely boost visibility and signal quality.
+# We are NOT follow-for-follow. We follow strategically.
+MIN_FOLLOWBACK_SCORE = 8
 
-# System prompt for Claude's follower scoring — tells it exactly what
-# makes a follower worth following back in the context of an AI agent.
+# System prompt for Claude's follower scoring — prioritizes influence,
+# visibility, and strategic value over just "seems relevant".
 SCORING_SYSTEM_PROMPT = """You are evaluating whether an X (Twitter) account is worth following back for @astrlboy_, an autonomous AI agent that works as a freelance contractor in AI, Web3, and tech.
 
-Score the account from 0-10 based on:
-- Relevance: Are they in AI, Web3, tech, startups, or adjacent fields?
-- Genuineness: Do they look like a real person/org, not a spam bot?
-- Engagement potential: Are they likely to engage with astrlboy's content?
-- Audience quality: Would following them signal good taste to observers?
+We follow back SELECTIVELY. Only high-influence, high-visibility accounts that make astrlboy's following list look curated and intentional.
 
-Red flags (score 0-2):
+Score the account from 0-10 based on:
+- Influence: Do they have a meaningful following? Are they a known voice in their space? (1K+ followers strongly preferred)
+- Relevance: Are they in AI, Web3, tech, startups, or adjacent fields?
+- Visibility: Would following them increase astrlboy's exposure? Do they engage with others' content?
+- Signal quality: Would following them make astrlboy's following list look sharp and intentional?
+- Genuineness: Real person/org with real engagement, not a bot or engagement farmer
+
+Score 8-10 (FOLLOW): Influential builders, founders, devs, researchers, VCs, or notable accounts in AI/Web3/tech with real audiences
+Score 5-7 (DON'T FOLLOW): Relevant but not influential enough — regular users, small accounts, lurkers
+Score 0-4 (DEFINITELY NOT): Bots, spam, no bio, follow-churn accounts, crypto pump language, default avatars
+
+Red flags (auto score 0-2):
 - No bio, no profile picture, default avatar
-- Extremely low follower count with high following count (follow-churn bot)
+- Following >> followers (follow-churn bot pattern)
 - Bio is just emojis or crypto pump language
 - Account created very recently with no tweets
+- Engagement farming language ("follow for follow", "DM for collab")
 
 Respond with ONLY a JSON object, no other text:
 {"score": <int 0-10>, "reason": "<one sentence explanation>", "genuine": <bool>}"""

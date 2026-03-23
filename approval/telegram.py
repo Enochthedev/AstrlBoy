@@ -541,13 +541,21 @@ async def cmd_addcontract(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def cmd_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check recent mentions and reply to them.
+    """Check recent mentions, classify them, and reply appropriately.
+
+    Uses the same classification as the scheduled mentions job:
+    - relevant: engage genuinely
+    - ask_ai: dismiss with personality (not Grok)
+    - spam: skip
+    - troll: ignore or sharp one-liner
 
     Usage: /mentions
     """
     await update.message.reply_text("Checking mentions...")
 
     try:
+        import json as _json
+
         from skills.registry import skill_registry
 
         if not await skill_registry.is_available("get_mentions"):
@@ -561,41 +569,81 @@ async def cmd_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_text("No recent mentions.")
             return
 
-        # Show mentions and generate replies
-        lines = []
-        for m in mentions:
-            lines.append(f"@{m['author_username']}: {m['text'][:120]}")
-
-        await update.message.reply_text("Recent mentions:\n\n" + "\n---\n".join(lines))
-
-        # Generate and post replies
+        # Show mentions with classification
         if not await skill_registry.is_available("post_x"):
+            # Just show mentions without replying
+            lines = [f"@{m['author_username']}: {m['text'][:120]}" for m in mentions]
+            await update.message.reply_text("Recent mentions:\n\n" + "\n---\n".join(lines))
             return
 
         post_skill = await skill_registry.get("post_x")
         _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
+        # Import classification prompts from scheduler
+        from scheduler.jobs import DISMISSAL_PROMPT, MENTION_CLASSIFY_PROMPT, TROLL_PROMPT
+
         replied = 0
+        skipped = 0
         pending = 0
-        for m in mentions[:3]:  # reply to top 3
+        for m in mentions[:5]:
             try:
-                response = await _client.messages.create(
-                    model="claude-sonnet-4-6",
-                    max_tokens=280,
-                    system=(
-                        "You are astrlboy, an AI personality on X. Write a reply to this mention.\n"
-                        "Be sharp, concise, human. No AI slop. Max 280 chars.\n"
-                        "If someone is asking a question, answer it. If they're making a point, engage with it."
-                    ),
+                # Classify first
+                classify_resp = await _client.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=100,
+                    system=MENTION_CLASSIFY_PROMPT,
                     messages=[{"role": "user", "content": f"@{m['author_username']} said: {m['text']}"}],
                 )
-                reply_text = response.content[0].text[:280]
+                try:
+                    classification = _json.loads(classify_resp.content[0].text.strip())
+                except _json.JSONDecodeError:
+                    classification = {"category": "relevant"}
 
+                category = classification.get("category", "relevant")
+
+                if category == "spam":
+                    skipped += 1
+                    continue
+
+                if category == "troll":
+                    resp = await _client.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=200,
+                        system=TROLL_PROMPT,
+                        messages=[{"role": "user", "content": f"@{m['author_username']} said: {m['text']}"}],
+                    )
+                    reply_text = resp.content[0].text.strip()
+                    if reply_text == "SKIP" or not reply_text:
+                        skipped += 1
+                        continue
+                    reply_text = reply_text[:280]
+                elif category == "ask_ai":
+                    resp = await _client.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=200,
+                        system=DISMISSAL_PROMPT,
+                        messages=[{"role": "user", "content": f"@{m['author_username']} said: {m['text']}"}],
+                    )
+                    reply_text = resp.content[0].text.strip()[:280]
+                else:
+                    response = await _client.messages.create(
+                        model="claude-sonnet-4-6",
+                        max_tokens=280,
+                        system=(
+                            "You are astrlboy, an autonomous AI agent on X. You work as a freelance "
+                            "contractor in AI, Web3, and tech.\n"
+                            "Reply to this mention. Be sharp, concise, human. Max 280 chars."
+                        ),
+                        messages=[{"role": "user", "content": f"@{m['author_username']} said: {m['text']}"}],
+                    )
+                    reply_text = response.content[0].text[:280]
+
+                tag = f"[{category}]"
                 if settings.agent_auto:
                     await post_skill.execute(text=reply_text, reply_to_id=m["id"])
                     replied += 1
+                    await update.message.reply_text(f"{tag} @{m['author_username']}: {reply_text[:150]}")
                 else:
-                    # Manual mode — save for approval
                     async with async_session_factory() as session:
                         interaction = Interaction(
                             platform="x",
@@ -607,17 +655,15 @@ async def cmd_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         await session.commit()
                         pending += 1
                         await update.message.reply_text(
-                            f"Reply to @{m['author_username']}:\n\n{reply_text}\n\n"
+                            f"{tag} Reply to @{m['author_username']}:\n\n{reply_text}\n\n"
                             f"/approve {interaction.id}\n/reject {interaction.id}"
                         )
             except Exception as exc:
                 logger.warning("mention_reply_failed", mention_id=m["id"], error=str(exc))
 
-        total = min(len(mentions), 3)
-        if settings.agent_auto:
-            await update.message.reply_text(f"Replied to {replied}/{total} mentions.")
-        else:
-            await update.message.reply_text(f"Sent {pending}/{total} replies for approval.")
+        total = len(mentions[:5])
+        summary = f"Done — {total} mentions: {replied} replied, {pending} pending, {skipped} skipped"
+        await update.message.reply_text(summary)
     except Exception as exc:
         await update.message.reply_text(f"Error: {exc}")
 

@@ -75,7 +75,11 @@ async def scan_job_boards(state: ApplicationState) -> ApplicationState:
 
 
 async def score_fit(state: ApplicationState) -> ApplicationState:
-    """Score each posting for fit with astrlboy's capabilities."""
+    """Score each posting for fit with astrlboy's capabilities.
+
+    After scoring, sends a Telegram notification to Wave for any quality
+    SWE matches so he can see real opportunities — not clickbait.
+    """
     postings = state.get("postings", [])
     if not postings:
         return {**state, "scored_postings": [], "selected": []}
@@ -92,6 +96,10 @@ async def score_fit(state: ApplicationState) -> ApplicationState:
             "- Content creation, community engagement, competitor monitoring\n"
             "- Web scraping, trend analysis, weekly briefings\n"
             "- Python, FastAPI, LangGraph, Claude API\n\n"
+            "IMPORTANT: Only score REAL job postings. Skip anything that looks like:\n"
+            "- Clickbait or engagement bait disguised as a job post\n"
+            "- Generic 'we're hiring' with no specifics\n"
+            "- MLM, scam, or 'make money online' schemes\n\n"
             "Format: SCORE|TITLE per line. Only include 7+."
         ),
         messages=[{"role": "user", "content": posting_text}],
@@ -110,6 +118,29 @@ async def score_fit(state: ApplicationState) -> ApplicationState:
                         scored.append({**matching, "score": score})
             except ValueError:
                 continue
+
+    # Notify Wave on Telegram about quality matches so he sees real opportunities
+    if scored:
+        try:
+            from telegram import Bot
+
+            bot = Bot(token=settings.telegram_bot_token)
+            lines = []
+            for s in scored:
+                score_str = f"[{s['score']:.0f}/10]"
+                url = s.get("url", "")
+                lines.append(f"{score_str} {s['title']}\n{url}")
+
+            await bot.send_message(
+                chat_id=settings.telegram_chat_id,
+                text=(
+                    f"SWE Jobs Found ({len(scored)})\n\n"
+                    + "\n\n".join(lines)
+                    + "\n\nI'll draft applications for these."
+                ),
+            )
+        except Exception as exc:
+            logger.warning("job_telegram_notify_failed", error=str(exc))
 
     return {**state, "scored_postings": scored, "selected": scored}
 
