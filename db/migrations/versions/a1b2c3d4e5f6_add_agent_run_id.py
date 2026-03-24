@@ -1,4 +1,4 @@
-"""add agent_run_id to content and interactions
+"""add engagement metrics and agent_run_id to content and interactions
 
 Revision ID: a1b2c3d4e5f6
 Revises: ed504fd0fd30
@@ -17,6 +17,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Engagement metrics — populated by performance tracking job
+    op.add_column('content', sa.Column('tweet_id', sa.String(length=100), nullable=True))
+    op.add_column('content', sa.Column('likes', sa.Integer(), nullable=True))
+    op.add_column('content', sa.Column('retweets', sa.Integer(), nullable=True))
+    op.add_column('content', sa.Column('replies', sa.Integer(), nullable=True))
+    op.add_column('content', sa.Column('impressions', sa.Integer(), nullable=True))
+    op.add_column('content', sa.Column('engagement_score', sa.Float(), nullable=True))
+    op.add_column('content', sa.Column('metrics_updated_at', sa.DateTime(timezone=True), nullable=True))
     # Links content rows back to R2 autonomous run traces for fine-tuning
     op.add_column('content', sa.Column('agent_run_id', sa.Text(), nullable=True))
     op.add_column('interactions', sa.Column('agent_run_id', sa.Text(), nullable=True))
@@ -25,3 +33,10 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_column('interactions', 'agent_run_id')
     op.drop_column('content', 'agent_run_id')
+    op.drop_column('content', 'metrics_updated_at')
+    op.drop_column('content', 'engagement_score')
+    op.drop_column('content', 'impressions')
+    op.drop_column('content', 'replies')
+    op.drop_column('content', 'retweets')
+    op.drop_column('content', 'likes')
+    op.drop_column('content', 'tweet_id')
