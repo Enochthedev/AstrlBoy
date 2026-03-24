@@ -98,12 +98,13 @@ class AgentMemory:
         """
         client = self._ensure_client()
 
+        # v2 API: user_id must be inside filters, not top-level. limit param is top_k.
         kwargs: dict = {
             "query": query,
-            "limit": limit,
+            "top_k": limit,
         }
         if contract_slug:
-            kwargs["user_id"] = contract_slug
+            kwargs["filters"] = {"user_id": contract_slug}
 
         results = await client.search(**kwargs)
 
@@ -127,9 +128,10 @@ class AgentMemory:
         """
         client = self._ensure_client()
 
+        # v2 API: user_id must be inside filters, not top-level
         kwargs: dict = {}
         if contract_slug:
-            kwargs["user_id"] = contract_slug
+            kwargs["filters"] = {"user_id": contract_slug}
 
         results = await client.get_all(**kwargs)
 
