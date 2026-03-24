@@ -37,6 +37,7 @@ class AgentResult:
     tool_calls: list[dict] = field(default_factory=list)
     turns: int = 0
     duration_ms: int = 0
+    run_id: str = ""  # R2 key for the full trace — link content/interactions back to this
 
 
 def _skills_to_tools(skills: list[BaseTool]) -> list[dict]:
@@ -263,6 +264,8 @@ async def run_autonomous(
         return AgentResult(text="Agent is paused. Use /resume to restart.", turns=0)
 
     start = time.monotonic()
+    from uuid import uuid4
+    run_id = uuid4()
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     # Get available skills and convert to tool definitions
@@ -369,21 +372,40 @@ async def run_autonomous(
             elif block.type == "tool_use":
                 tool_use_blocks.append(block)
 
-        # If no tool calls, we're done
+        # If no tool calls, we're done — dump the full trace for training data
         if not tool_use_blocks:
             final_text = "\n".join(text_parts)
             duration = int((time.monotonic() - start) * 1000)
+            try:
+                await r2_client.dump(
+                    contract_slug=contract.client_slug if contract else "astrlboy",
+                    entity_type="autonomous_runs",
+                    entity_id=run_id,
+                    data={
+                        "task": task,
+                        "tool_calls": all_tool_calls,
+                        "turns": turn + 1,
+                        "final_text": final_text,
+                        "model": model,
+                        "duration_ms": duration,
+                        "outcome": "success",
+                    },
+                )
+            except Exception:
+                pass
             logger.info(
                 "autonomous_run_completed",
                 turns=turn + 1,
                 tool_calls=len(all_tool_calls),
                 duration_ms=duration,
+                run_id=str(run_id),
             )
             return AgentResult(
                 text=final_text,
                 tool_calls=all_tool_calls,
                 turns=turn + 1,
                 duration_ms=duration,
+                run_id=str(run_id),
             )
 
         # Add assistant response to messages
@@ -466,14 +488,12 @@ async def run_autonomous(
         duration_ms=duration,
     )
 
-    # Dump the full run to R2 for training data
+    # Dump the full run to R2 for training data — outcome="max_turns" flags it as incomplete
     try:
-        from uuid import uuid4
-
         await r2_client.dump(
             contract_slug=contract.client_slug if contract else "astrlboy",
             entity_type="autonomous_runs",
-            entity_id=uuid4(),
+            entity_id=run_id,
             data={
                 "task": task,
                 "tool_calls": all_tool_calls,
@@ -481,6 +501,7 @@ async def run_autonomous(
                 "final_text": final_text,
                 "model": model,
                 "duration_ms": duration,
+                "outcome": "max_turns",
             },
         )
     except Exception:
@@ -491,4 +512,5 @@ async def run_autonomous(
         tool_calls=all_tool_calls,
         turns=max_turns,
         duration_ms=duration,
+        run_id=str(run_id),
     )

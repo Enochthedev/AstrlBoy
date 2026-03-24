@@ -32,6 +32,8 @@ class Interaction(Base):
     draft: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     r2_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Links this interaction back to the autonomous_runs R2 trace that created it.
+    agent_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

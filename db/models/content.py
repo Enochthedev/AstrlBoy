@@ -34,6 +34,10 @@ class Content(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
     platform: Mapped[str | None] = mapped_column(String(50), nullable=True)
     r2_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Links this content back to the autonomous_runs R2 trace that created it.
+    # When engagement comes in later, use this to retrieve the tool sequence
+    # that produced the content — the raw material for fine-tuning.
+    agent_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Engagement metrics — populated by performance tracking job
     tweet_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     likes: Mapped[int | None] = mapped_column(Integer, nullable=True)

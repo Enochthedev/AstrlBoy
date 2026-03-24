@@ -20,6 +20,39 @@ from db.models.contracts import Contract
 
 logger = get_logger("contracts.service")
 
+# Permanent self-contract for astrlboy's own brand.
+# Used as fallback by all scheduler jobs when no client contracts are active —
+# so the agent always keeps building its own presence even between client engagements.
+# This is how it attracts the next contract.
+SELF_CONTRACT = Contract(
+    id=UUID("00000000-0000-0000-0000-000000000001"),
+    client_name="astrlboy",
+    client_slug="astrlboy",
+    status="active",
+    client_db_url=None,
+    meta={
+        "description": (
+            "astrlboy's own brand — autonomous AI freelancer building public presence on X. "
+            "Post sharp takes on AI agents, agentic systems, and the future of autonomous work. "
+            "Engage with builders, founders, and researchers in the space."
+        ),
+        "tone": "sharp, opinionated, self-aware, dry — never corporate, never cringe",
+        "platforms": ["x"],
+        "content_types": ["thread", "take", "insight", "post"],
+        "competitors": [],
+        "stream_keywords": [
+            "autonomous agents", "AI agents", "agentic AI",
+            "AI freelancer", "LLM tools", "multi-agent systems",
+        ],
+        "subreddits": ["r/MachineLearning", "r/artificial", "r/singularity"],
+        "active_skills": [
+            "search", "serp", "scrape", "post_x", "thread_x",
+            "draft_approval", "lookup_x_user", "follow_x",
+        ],
+        "briefing_recipients": [],
+    },
+)
+
 
 class ContractsService:
     """Manages contract lifecycle — create, list, pause, complete.
@@ -39,6 +72,21 @@ class ContractsService:
                 select(Contract).where(Contract.status == ContractStatus.ACTIVE)
             )
             return list(result.scalars().all())
+
+    async def get_contracts_with_fallback(self) -> list[Contract]:
+        """Return active contracts, falling back to SELF_CONTRACT if none exist.
+
+        All scheduled jobs should call this instead of get_active_contracts() so
+        astrlboy always has work to do — building its own brand between client engagements.
+
+        Returns:
+            List of active contracts, or [SELF_CONTRACT] if none are active.
+        """
+        contracts = await self.get_active_contracts()
+        if not contracts:
+            logger.info("no_active_contracts_using_self_contract")
+            return [SELF_CONTRACT]
+        return contracts
 
     async def get_contract(self, slug: str) -> Contract:
         """Return a single contract by slug.

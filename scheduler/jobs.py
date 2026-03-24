@@ -4,7 +4,7 @@ APScheduler job definitions.
 All scheduled jobs are defined here. Every job:
 - Checks AGENT_PAUSED before executing
 - Acquires a Redis lock to prevent double execution on Railway restart
-- Iterates all active contracts
+- Iterates active contracts, falling back to SELF_CONTRACT when none are active
 """
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -33,7 +33,7 @@ async def run_content_job() -> None:
     async with redis_lock("content_job") as acquired:
         if not acquired:
             return
-        contracts = await contracts_service.get_active_contracts()
+        contracts = await contracts_service.get_contracts_with_fallback()
         for contract in contracts:
             try:
                 content_types = contract.meta.get("content_types", ["post"])
@@ -51,7 +51,7 @@ async def run_engagement_job() -> None:
     async with redis_lock("engagement_job") as acquired:
         if not acquired:
             return
-        contracts = await contracts_service.get_active_contracts()
+        contracts = await contracts_service.get_contracts_with_fallback()
         for contract in contracts:
             platforms = contract.meta.get("platforms", ["x"])
             for platform in platforms:
@@ -69,7 +69,7 @@ async def run_intelligence_job() -> None:
     async with redis_lock("intelligence_job") as acquired:
         if not acquired:
             return
-        contracts = await contracts_service.get_active_contracts()
+        contracts = await contracts_service.get_contracts_with_fallback()
         for contract in contracts:
             try:
                 await intelligence_graph.run(contract)
@@ -85,7 +85,7 @@ async def run_reporting_job() -> None:
     async with redis_lock("reporting_job") as acquired:
         if not acquired:
             return
-        contracts = await contracts_service.get_active_contracts()
+        contracts = await contracts_service.get_contracts_with_fallback()
         for contract in contracts:
             try:
                 await reporting_graph.run(contract)
@@ -115,7 +115,7 @@ async def run_feedback_job() -> None:
     async with redis_lock("feedback_job") as acquired:
         if not acquired:
             return
-        contracts = await contracts_service.get_active_contracts()
+        contracts = await contracts_service.get_contracts_with_fallback()
         for contract in contracts:
             try:
                 await feedback_graph.run(contract)
@@ -131,7 +131,7 @@ async def run_experiments_job() -> None:
     async with redis_lock("experiments_job") as acquired:
         if not acquired:
             return
-        contracts = await contracts_service.get_active_contracts()
+        contracts = await contracts_service.get_contracts_with_fallback()
         for contract in contracts:
             try:
                 await experiments_graph.run(contract)
@@ -895,7 +895,7 @@ async def run_keyword_tracking_job() -> None:
                 return
 
             tracking_skill = await skill_registry.get("track_keyword_rankings")
-            contracts = await contracts_service.get_active_contracts()
+            contracts = await contracts_service.get_contracts_with_fallback()
             for contract in contracts:
                 keywords = (contract.meta or {}).get("stream_keywords", [])
                 if keywords:
@@ -925,7 +925,7 @@ async def run_growth_job() -> None:
         try:
             from agent.autonomous import run_autonomous
 
-            contracts = await contracts_service.get_active_contracts()
+            contracts = await contracts_service.get_contracts_with_fallback()
             for contract in contracts:
                 keywords = (contract.meta or {}).get("stream_keywords", [])
                 if not keywords:
@@ -994,7 +994,7 @@ async def run_compression_job() -> None:
         try:
             from memory.compression import compress_weekly_memories
 
-            contracts = await contracts_service.get_active_contracts()
+            contracts = await contracts_service.get_contracts_with_fallback()
             for contract in contracts:
                 try:
                     stored = await compress_weekly_memories(
