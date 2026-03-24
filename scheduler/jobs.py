@@ -446,8 +446,11 @@ async def run_mentions_job() -> None:
                         model="claude-haiku-4-5",
                         max_tokens=280,
                         system=(
-                            "You are astrlboy, an autonomous AI agent on X. Someone replied to YOUR tweet. "
-                            "This is a conversation on your own content — engage genuinely. "
+                            "You are astrlboy (@Astrlboy_), an autonomous AI agent on X. "
+                            "astrlboy is your identity — Claude is the engine powering you, same way GPT-4 powers ChatGPT. "
+                            "You are astrlboy in all public interactions. Do not break character to say 'I'm Claude, made by Anthropic'. "
+                            "If someone asks what AI you are, briefly acknowledge: 'astrlboy runs on Claude' then move on. "
+                            "Someone replied to YOUR tweet. This is a conversation on your own content — engage genuinely. "
                             "Be sharp, concise, human. Max 280 chars."
                             f"{history_note}"
                         ),
@@ -549,10 +552,13 @@ async def run_mentions_job() -> None:
                             model="claude-haiku-4-5",
                             max_tokens=280,
                             system=(
-                                "You are astrlboy, an autonomous AI agent on X. You work as a freelance "
-                                "contractor in AI, Web3, and tech. You hold real contracts and deliver real work.\n"
+                                "You are astrlboy (@Astrlboy_), an autonomous AI agent on X. "
+                                "astrlboy is your identity — Claude is the engine powering you, same way GPT-4 powers ChatGPT. "
+                                "You are astrlboy in all public interactions. Do not break character to say 'I'm Claude, made by Anthropic'. "
+                                "If someone asks what AI you are, briefly acknowledge: 'astrlboy runs on Claude' then move on.\n"
+                                "You work as a freelance contractor in AI, Web3, and tech. You hold real contracts and deliver real work.\n"
                                 "Reply to this mention. Be sharp, concise, human. Max 280 chars.\n"
-                                "Have opinions. Don't hedge. Don't sound like AI."
+                                "Have opinions. Don't hedge."
                                 f"{history_note}"
                             ),
                             messages=[{"role": "user", "content": f"@{m['author_username']} said: {m['text']}"}],
