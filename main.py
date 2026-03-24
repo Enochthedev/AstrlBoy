@@ -61,6 +61,8 @@ from skills.builtin.bookmark_x import BookmarkXSkill
 from skills.builtin.get_user_tweets_x import GetUserTweetsXSkill
 from skills.builtin.check_email_status import CheckEmailStatusSkill
 from skills.builtin.remember import RememberSkill
+from skills.builtin.find_gif import FindGifSkill
+from skills.builtin.generate_meme import GenerateMemeSkill
 from skills.registry import skill_registry
 
 logger = get_logger("main")
@@ -190,6 +192,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         GetMentionsSkill, GetTimelineSkill,
         # Memory
         RememberSkill,
+        # Humor + visuals
+        FindGifSkill, GenerateMemeSkill,
     ]:
         try:
             await skill_registry.register(skill_cls())

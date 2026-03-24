@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = ""
 
+    # Meme / GIF
+    tenor_api_key: str = ""         # Google Cloud API key with Tenor access enabled
+    imgflip_username: str = ""      # imgflip.com account username
+    imgflip_password: str = ""      # imgflip.com account password
+
     # Memory — mem0 (long-term semantic memory for the agent)
     mem0_api_key: str = ""          # from app.mem0.ai — free tier available
 
