@@ -141,9 +141,13 @@ class ContentGraph(BaseGraph):
             "long_term_memories": long_term_memories,
         }
 
-        # Thread ID for checkpointer — unique per contract + date + content type
+        # Thread ID for checkpointer — unique per contract + date + hour bucket
+        # Hour bucket (am/pm) ensures morning and afternoon runs don't share state
+        from datetime import datetime
+        now = datetime.now()
+        slot = "am" if now.hour < 13 else "pm"
         today = date.today().isoformat()
-        config = {"configurable": {"thread_id": f"{contract.client_slug}_content_{today}"}}
+        config = {"configurable": {"thread_id": f"{contract.client_slug}_content_{today}_{slot}"}}
 
         logger.info(
             "content_graph_started",

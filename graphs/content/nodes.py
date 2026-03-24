@@ -6,9 +6,12 @@ with conditional edges for the critique loop.
 """
 
 import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
+from sqlalchemy import select
 
 from core.config import settings
 from core.logging import get_logger
@@ -22,6 +25,65 @@ from storage.r2 import r2_client
 logger = get_logger("graphs.content.nodes")
 
 _anthropic = AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+# Words too common to count as meaningful topic overlap
+_STOP_WORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "for", "in", "on", "to", "of", "and", "or", "with", "at", "by", "from",
+    "as", "it", "its", "this", "that", "these", "those", "not", "but", "how",
+    "why", "what", "when", "who", "will", "can", "has", "have", "had",
+    "just", "now", "also", "more", "new", "about", "i", "you", "we", "they",
+}
+
+
+async def _is_recent_duplicate(
+    title: str,
+    draft: str,
+    contract_id: uuid.UUID,
+    days: int = 14,
+) -> bool:
+    """Check if similar content was published in the last N days.
+
+    Compares the new title and first tweet/line against recent published content
+    using significant-word overlap. 3+ shared non-stop words = too similar.
+
+    This prevents the scheduler from posting about the same topic twice in two weeks,
+    even when research surfaces the same trending story repeatedly.
+    """
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Content.title, Content.body)
+                .where(Content.contract_id == contract_id)
+                .where(Content.status.in_(["published", "approved"]))
+                .where(Content.created_at >= cutoff)
+            )
+            recent = result.all()
+
+        if not recent:
+            return False
+
+        # Extract meaningful words from new content
+        first_line = draft.split("\n")[0][:200].lower()
+        new_words = set(title.lower().split() + first_line.split()) - _STOP_WORDS
+
+        for old_title, old_body in recent:
+            old_first_line = (old_body or "").split("\n")[0][:200].lower()
+            old_words = set((old_title or "").lower().split() + old_first_line.split()) - _STOP_WORDS
+            overlap = new_words & old_words
+            if len(overlap) >= 3:
+                logger.info(
+                    "content_duplicate_skipped",
+                    overlap=list(overlap)[:5],
+                    new_title=title[:60],
+                    old_title=(old_title or "")[:60],
+                )
+                return True
+
+        return False
+    except Exception:
+        return False  # If check fails, don't block publishing
 
 
 async def research_trends(state: ContentState) -> ContentState:
@@ -160,11 +222,24 @@ async def generate_draft(state: ContentState) -> ContentState:
     )
 
     user_prompt = (
-        f"Write a {state['content_type']} based on this research:\n\n"
-        f"{state.get('research', 'No research available.')}\n\n"
-        "Return your response in this format:\n"
-        "TITLE: <title>\n"
-        "BODY:\n<full content>"
+        f"Based on this research, decide whether this content should be a THREAD or a SINGLE TWEET.\n\n"
+        f"Research:\n{state.get('research', 'No research available.')}\n\n"
+        "DECISION RULES:\n"
+        "- THREAD (3-7 tweets) if: the topic has multiple distinct angles, there's a story arc,\n"
+        "  there's data + context + implication, or it would feel rushed in one tweet.\n"
+        "- SINGLE TWEET if: it's a hot take, a one-liner observation, or the whole point lands in ≤280 chars.\n"
+        "  Most content that can be said cleanly in one tweet SHOULD be one tweet.\n\n"
+        "OUTPUT FORMAT:\n"
+        "TITLE: <title for the piece>\n"
+        "FORMAT: thread OR tweet\n"
+        "BODY:\n"
+        "<if thread: write each tweet on its own block like this>\n"
+        "Tweet 1:\n"
+        "<tweet text, max 280 chars>\n\n"
+        "Tweet 2:\n"
+        "<tweet text, max 280 chars>\n\n"
+        "...\n\n"
+        "<if single tweet: write just the tweet text, max 280 chars>\n"
     )
 
     response = await _anthropic.messages.create(
@@ -178,11 +253,14 @@ async def generate_draft(state: ContentState) -> ContentState:
     title = ""
     body = text
 
-    # Parse title and body from response
+    # Parse title, format flag, and body from response
     if "TITLE:" in text and "BODY:" in text:
         parts = text.split("BODY:", 1)
-        title = parts[0].replace("TITLE:", "").strip()
+        header = parts[0]
         body = parts[1].strip()
+        # Extract title (strip out the FORMAT line if present)
+        title_block = header.replace("FORMAT: thread", "").replace("FORMAT: tweet", "").strip()
+        title = title_block.replace("TITLE:", "").strip()
 
     duration = int((time.monotonic() - start) * 1000)
     await agent_service.log_action(
@@ -343,10 +421,20 @@ async def save(state: ContentState) -> ContentState:
 async def publish(state: ContentState) -> ContentState:
     """Post the content via the appropriate platform skill.
 
+    Dedup-checks against the last 14 days before posting — if the same topic
+    was already covered recently, skips silently rather than spamming the feed.
     In manual mode, sends drafts to Telegram for approval instead of posting directly.
     """
     meta = state["contract_meta"]
     platforms = meta.get("platforms", [])
+
+    # Dedup check — don't post about the same topic twice in 14 days
+    if await _is_recent_duplicate(
+        title=state.get("title", ""),
+        draft=state.get("draft", ""),
+        contract_id=state["contract_id"],
+    ):
+        return {**state, "status": "skipped_duplicate"}
 
     if settings.agent_auto:
         # Auto mode — post immediately
@@ -356,7 +444,17 @@ async def publish(state: ContentState) -> ContentState:
             if await skill_registry.is_available(skill_name):
                 try:
                     skill = await skill_registry.get(skill_name)
-                    result = await skill.execute(text=state["draft"][:280] if platform == "x" else state["draft"])
+                    draft = state["draft"]
+                    if platform == "x":
+                        # Detect thread format and use thread_x instead
+                        from approval.telegram import _parse_thread_draft
+                        tweets = _parse_thread_draft(draft)
+                        if len(tweets) >= 2 and await skill_registry.is_available("thread_x"):
+                            thread_skill = await skill_registry.get("thread_x")
+                            result = await thread_skill.execute(tweets=tweets)
+                            logger.info("content_published_thread", platform=platform, tweets=len(tweets), contract_slug=state["contract_slug"])
+                        else:
+                            result = await skill.execute(text=draft[:280])
                     # Store tweet_id for performance tracking
                     if platform == "x" and isinstance(result, dict) and result.get("tweet_id"):
                         tweet_id = result["tweet_id"]
@@ -377,12 +475,14 @@ async def publish(state: ContentState) -> ContentState:
                     logger.error("publish_failed", platform=platform, error=str(exc))
         return {**state, "status": "published", "tweet_id": tweet_id}
     else:
-        # Manual mode — send to Telegram for approval
+        # Manual mode — send to Telegram for approval.
+        # Send the FULL draft — cmd_approve handles thread detection and truncation.
+        # Never truncate here or thread format gets destroyed before it can be parsed.
         if await skill_registry.is_available("draft_approval"):
             try:
                 approval_skill = await skill_registry.get("draft_approval")
                 await approval_skill.execute(
-                    draft=state["draft"][:280] if "x" in platforms else state["draft"],
+                    draft=state["draft"],
                     platform=platforms[0] if platforms else "x",
                     contract_slug=state["contract_slug"],
                     title=state.get("title", ""),

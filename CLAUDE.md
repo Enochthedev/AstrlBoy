@@ -921,6 +921,8 @@ Follow these without exception:
 - Every multi-table write uses a transaction
 - Never commit inside a loop — batch where possible
 - Always close sessions — use `async with session` pattern
+- NEVER edit an existing migration file after it has been committed. Once a migration is in git and applied to any environment, it is immutable. Always create a NEW migration file for additional changes.
+- When adding columns to a model, always create a new migration immediately in the same commit — never let the model get ahead of the migrations.
 
 **Comments**
 - Comment the *why*, not the *what*

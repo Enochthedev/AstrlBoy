@@ -71,6 +71,45 @@ _scheduler = None
 _telegram_app = None
 
 
+async def _validate_schema() -> None:
+    """Validate DB schema matches SQLAlchemy models. Hard-fails on mismatch.
+
+    Runs at startup AFTER alembic upgrade head. If a migration was never applied
+    or was applied with fewer columns than the current model, this catches it
+    immediately with a clear error — instead of crashing mid-operation when the
+    first INSERT or SELECT hits the missing column.
+
+    Rule: never edit an existing migration after it has been committed and applied.
+    Always create a new migration file for additional columns.
+    """
+    from sqlalchemy import inspect
+
+    from db.base import Base, engine
+
+    async with engine.connect() as conn:
+        def _get_db_cols(sync_conn):
+            inspector = inspect(sync_conn)
+            result = {}
+            for table_name in inspector.get_table_names():
+                result[table_name] = {c["name"] for c in inspector.get_columns(table_name)}
+            return result
+
+        db_columns = await conn.run_sync(_get_db_cols)
+
+    missing = []
+    for table in Base.metadata.sorted_tables:
+        db_cols = db_columns.get(table.name, set())
+        for col in table.columns:
+            if col.name not in db_cols:
+                missing.append(f"{table.name}.{col.name}")
+
+    if missing:
+        raise RuntimeError(
+            f"DB schema mismatch — run 'alembic upgrade head' before starting. "
+            f"Missing: {missing}"
+        )
+
+
 async def _bootstrap_self_contract() -> None:
     """Create astrlboy's own contract if no contracts exist.
 
@@ -201,14 +240,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # Skills may fail to init if API keys are missing — non-fatal
             logger.warning("skill_init_failed", skill=skill_cls.__name__, error=str(exc))
 
-    # Create database tables if they don't exist
+    # Validate DB schema matches SQLAlchemy models.
+    # alembic upgrade head runs before this (see railway.toml startCommand) so
+    # this is a safety net — if columns are missing the app refuses to start
+    # with a clear error rather than crashing mid-operation later.
     try:
-        from db.base import Base, engine
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("db_tables_ready")
-    except Exception as exc:
-        logger.warning("db_init_failed", error=str(exc))
+        await _validate_schema()
+        logger.info("db_schema_valid")
+    except RuntimeError as exc:
+        # Hard fail — the app is broken without the correct schema
+        logger.error("db_schema_mismatch", error=str(exc))
+        raise
 
     # Bootstrap astrlboy's own contract if none exist
     try:

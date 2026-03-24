@@ -25,9 +25,13 @@ from graphs.reporting.graph import reporting_graph
 logger = get_logger("scheduler.jobs")
 
 
-# Content generation — Tue + Fri 08:00 WAT
+# Morning content — Daily 08:00 WAT (Mon-Sat, rest Sun)
 async def run_content_job() -> None:
-    """Generate content for all active contracts."""
+    """Generate and post content for all active contracts.
+
+    Runs daily Mon-Sat at 08:00 WAT. The content graph decides thread vs single
+    tweet based on research depth. Dedup prevents repeating recent topics.
+    """
     if await agent_service.is_paused():
         return
     async with redis_lock("content_job") as acquired:
@@ -36,11 +40,26 @@ async def run_content_job() -> None:
         contracts = await contracts_service.get_contracts_with_fallback()
         for contract in contracts:
             try:
-                content_types = contract.meta.get("content_types", ["post"])
-                for ct in content_types[:1]:  # One piece per run
-                    await content_graph.run(contract, content_type=ct)
+                await content_graph.run(contract, content_type="post_or_thread")
             except Exception as exc:
                 logger.error("content_job_failed", slug=contract.client_slug, error=str(exc))
+
+
+# Afternoon content — Daily 17:00 WAT (Mon-Fri only)
+# Second post of the day — keeps the account active in EU/US evening hours.
+async def run_content_afternoon_job() -> None:
+    """Second daily content run targeting EU/US evening audience."""
+    if await agent_service.is_paused():
+        return
+    async with redis_lock("content_afternoon_job") as acquired:
+        if not acquired:
+            return
+        contracts = await contracts_service.get_contracts_with_fallback()
+        for contract in contracts:
+            try:
+                await content_graph.run(contract, content_type="post_or_thread")
+            except Exception as exc:
+                logger.error("content_afternoon_job_failed", slug=contract.client_slug, error=str(exc))
 
 
 # Community sweep — Daily 10:00 WAT
@@ -1027,9 +1046,16 @@ def create_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         run_content_job,
-        CronTrigger(day_of_week="tue,fri", hour=8, minute=0, timezone=tz),
+        CronTrigger(day_of_week="mon-sat", hour=8, minute=0, timezone=tz),
         id="content_job",
-        name="Content generation — Tue + Fri 08:00 WAT",
+        name="Morning content — Daily 08:00 WAT (Mon-Sat)",
+    )
+
+    scheduler.add_job(
+        run_content_afternoon_job,
+        CronTrigger(day_of_week="mon-fri", hour=17, minute=0, timezone=tz),
+        id="content_afternoon_job",
+        name="Afternoon content — Daily 17:00 WAT (Mon-Fri)",
     )
 
     scheduler.add_job(

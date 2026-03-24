@@ -618,7 +618,9 @@ async def cmd_makepost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Generating content for {contract.client_name}...")
 
         from graphs.content.graph import content_graph
-        result = await content_graph.run(contract, content_type="post")
+        # content_type="post_or_thread" — generate_draft decides thread vs single tweet
+        # based on research depth and whether the topic can land cleanly in one tweet
+        result = await content_graph.run(contract, content_type="post_or_thread")
 
         status = result.get("status", "unknown")
         title = result.get("title", "")
@@ -1115,6 +1117,11 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if replied and replied.text and replied.text != user_text:
             quoted = replied.text[:400].replace("\n", " ")
             task = f'[Referring to: "{quoted}"]\n\n{user_text}'
+
+        # In auto mode: append an execution reminder so the agent doesn't
+        # end by asking "should I post this?" — it should just do it.
+        if settings.agent_auto:
+            task = task + "\n\n[AUTO: Don't ask what to do next. Research if needed, then execute and report what you did.]"
 
         # Get the active contract for context (default: astrlboy's own)
         contract = None

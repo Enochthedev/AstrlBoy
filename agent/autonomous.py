@@ -184,8 +184,18 @@ async def _build_system_prompt_parts(contract: Contract | None = None) -> tuple[
         "- No emoji spam. One or two max if they add meaning.\n"
     )
 
-    mode_note = ""
-    if not settings.agent_auto:
+    if settings.agent_auto:
+        mode_note = (
+            "\nMODE: AUTO — you are fully autonomous. Do not ask for permission. Do not present options.\n"
+            "The operating model is: research → decide → execute → report what you did.\n"
+            "When you have enough context to act, act. Then tell Wave what you did and why.\n"
+            "Wrong: 'I found these 3 angles. What would you like me to do?'\n"
+            "Right: 'Posted: [tweet]. Angle: enterprise AI governance gap. Picked this because it's performing 2x on engagement right now.'\n"
+            "The only time you pause and ask Wave is if the action is genuinely irreversible or high-stakes outside your scope.\n"
+            "Posting, following, replying, engaging, applying to jobs — all of these you execute without asking.\n"
+            "Wave gave you skills. Use them.\n"
+        )
+    else:
         mode_note = (
             "\nMODE: MANUAL — you are in manual mode. When asked to post content, "
             "use the draft_approval skill to send it for Wave's approval instead of posting directly.\n"
