@@ -9,6 +9,7 @@ All scheduled jobs are defined here. Every job:
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from agent.service import agent_service
 from cache.redis import redis_lock
@@ -25,41 +26,155 @@ from graphs.reporting.graph import reporting_graph
 logger = get_logger("scheduler.jobs")
 
 
-# Morning content — Daily 08:00 WAT (Mon-Sat, rest Sun)
-async def run_content_job() -> None:
-    """Generate and post content for all active contracts.
+# Autonomous content decision loop — every 90 minutes
+# Replaces rigid morning/afternoon cron jobs. The agent checks context and
+# decides whether to post, mimicking how a human would decide — not a bot clock.
+async def run_decision_job() -> None:
+    """Autonomous content decision: check context, decide whether to post.
 
-    Runs daily Mon-Sat at 08:00 WAT. The content graph decides thread vs single
-    tweet based on research depth. Dedup prevents repeating recent topics.
+    Runs every 90 minutes. Applies active-hours gate (07:00-22:00 WAT),
+    checks posts already made today and time since last post, then uses a
+    probability model biased toward morning and afternoon to decide whether
+    to fire the content graph. The random factor prevents bot-like regularity.
+
+    Target cadence: ~2 posts per day, spaced naturally (not clock-driven).
     """
     if await agent_service.is_paused():
         return
-    async with redis_lock("content_job") as acquired:
-        if not acquired:
-            return
-        contracts = await contracts_service.get_contracts_with_fallback()
-        for contract in contracts:
-            try:
-                await content_graph.run(contract, content_type="post_or_thread")
-            except Exception as exc:
-                logger.error("content_job_failed", slug=contract.client_slug, error=str(exc))
 
+    import random
+    from datetime import date, datetime, timedelta, timezone
 
-# Afternoon content — Daily 17:00 WAT (Mon-Fri only)
-# Second post of the day — keeps the account active in EU/US evening hours.
-async def run_content_afternoon_job() -> None:
-    """Second daily content run targeting EU/US evening audience."""
-    if await agent_service.is_paused():
+    # WAT = UTC+1 — compute current WAT hour without a timezone library
+    now_utc = datetime.now(timezone.utc)
+    now_wat = now_utc + timedelta(hours=1)
+    wat_hour = now_wat.hour
+
+    # Only active 07:00–22:00 WAT — outside this window the agent sleeps
+    if wat_hour < 7 or wat_hour >= 22:
         return
-    async with redis_lock("content_afternoon_job") as acquired:
+
+    async with redis_lock("decision_job") as acquired:
         if not acquired:
             return
-        contracts = await contracts_service.get_contracts_with_fallback()
-        for contract in contracts:
-            try:
-                await content_graph.run(contract, content_type="post_or_thread")
-            except Exception as exc:
-                logger.error("content_afternoon_job_failed", slug=contract.client_slug, error=str(exc))
+
+        try:
+            from sqlalchemy import func, select
+
+            from db.base import async_session_factory
+            from db.models.content import Content
+
+            contracts = await contracts_service.get_contracts_with_fallback()
+
+            for contract in contracts:
+                try:
+                    today = date.today()
+
+                    async with async_session_factory() as session:
+                        # Count posts published today
+                        count_result = await session.execute(
+                            select(func.count(Content.id))
+                            .where(Content.contract_id == contract.id)
+                            .where(Content.status.in_(["published", "pending_approval"]))
+                            .where(func.date(Content.published_at) == today)
+                        )
+                        posts_today: int = count_result.scalar() or 0
+
+                        # Get the most recent post time
+                        last_result = await session.execute(
+                            select(Content.published_at)
+                            .where(Content.contract_id == contract.id)
+                            .where(Content.status.in_(["published", "pending_approval"]))
+                            .order_by(Content.published_at.desc())
+                            .limit(1)
+                        )
+                        last_post = last_result.scalar_one_or_none()
+
+                    # Hard cap: 2 posts per day max
+                    if posts_today >= 2:
+                        logger.info(
+                            "decision_skip",
+                            slug=contract.client_slug,
+                            reason="daily_cap_reached",
+                            posts_today=posts_today,
+                        )
+                        continue
+
+                    # Minimum gap between posts: 4.5h for second post, 2h otherwise
+                    if last_post is not None:
+                        last_post_utc = (
+                            last_post if last_post.tzinfo else last_post.replace(tzinfo=timezone.utc)
+                        )
+                        hours_since = (now_utc - last_post_utc).total_seconds() / 3600
+                        min_gap = 4.5 if posts_today >= 1 else 2.0
+                        if hours_since < min_gap:
+                            logger.info(
+                                "decision_skip",
+                                slug=contract.client_slug,
+                                reason="too_soon",
+                                hours_since=round(hours_since, 1),
+                                min_gap=min_gap,
+                            )
+                            continue
+
+                    # Probability model — biased toward morning and late afternoon,
+                    # lower at midday and evening to feel human, not automated.
+                    morning_window = 8 <= wat_hour <= 11     # prime posting time
+                    afternoon_window = 15 <= wat_hour <= 19  # second engagement peak
+                    midday = 12 <= wat_hour <= 14            # quieter period
+
+                    if posts_today == 0:
+                        # First post of the day
+                        if morning_window:
+                            post_prob = 0.80
+                        elif afternoon_window:
+                            post_prob = 0.70
+                        elif midday:
+                            post_prob = 0.35
+                        else:
+                            post_prob = 0.45
+                    else:
+                        # Second post — afternoon preferred
+                        if afternoon_window:
+                            post_prob = 0.65
+                        elif morning_window:
+                            post_prob = 0.25  # already posted, low chance of double-morning
+                        else:
+                            post_prob = 0.40
+
+                    roll = random.random()
+                    if roll > post_prob:
+                        logger.info(
+                            "decision_skip",
+                            slug=contract.client_slug,
+                            reason="probability_skip",
+                            roll=round(roll, 2),
+                            threshold=post_prob,
+                            posts_today=posts_today,
+                            wat_hour=wat_hour,
+                        )
+                        continue
+
+                    # Decision: post
+                    logger.info(
+                        "decision_post",
+                        slug=contract.client_slug,
+                        posts_today=posts_today,
+                        wat_hour=wat_hour,
+                        roll=round(roll, 2),
+                        threshold=post_prob,
+                    )
+                    await content_graph.run(contract, content_type="post_or_thread")
+
+                except Exception as exc:
+                    logger.error(
+                        "decision_job_contract_failed",
+                        slug=contract.client_slug,
+                        error=str(exc),
+                    )
+
+        except Exception as exc:
+            logger.error("decision_job_failed", error=str(exc))
 
 
 # Community sweep — Daily 10:00 WAT
@@ -1044,32 +1159,29 @@ def create_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler()
     tz = "Africa/Lagos"  # WAT (UTC+1)
 
+    # Autonomous content decision loop — checks context every 90 min and decides
+    # whether to post. Replaces rigid morning/afternoon cron triggers.
     scheduler.add_job(
-        run_content_job,
-        CronTrigger(day_of_week="mon-sat", hour=8, minute=0, timezone=tz),
-        id="content_job",
-        name="Morning content — Daily 08:00 WAT (Mon-Sat)",
+        run_decision_job,
+        IntervalTrigger(minutes=90, timezone=tz),
+        id="decision_job",
+        name="Autonomous content decision loop — every 90 min",
     )
 
-    scheduler.add_job(
-        run_content_afternoon_job,
-        CronTrigger(day_of_week="mon-fri", hour=17, minute=0, timezone=tz),
-        id="content_afternoon_job",
-        name="Afternoon content — Daily 17:00 WAT (Mon-Fri)",
-    )
-
+    # Jitter (seconds) makes each cron fire at a slightly different time each day.
+    # This prevents bot-like exact-minute patterns on external platforms.
     scheduler.add_job(
         run_engagement_job,
-        CronTrigger(hour=10, minute=0, timezone=tz),
+        CronTrigger(hour=10, minute=0, timezone=tz, jitter=1800),  # ±30 min
         id="engagement_job",
-        name="Community sweep — Daily 10:00 WAT",
+        name="Community sweep — ~10:00 WAT (±30 min)",
     )
 
     scheduler.add_job(
         run_intelligence_job,
-        CronTrigger(hour=7, minute=0, timezone=tz),
+        CronTrigger(hour=7, minute=0, timezone=tz, jitter=1200),  # ±20 min
         id="intelligence_job",
-        name="Competitor monitoring — Daily 07:00 WAT",
+        name="Competitor monitoring — ~07:00 WAT (±20 min)",
     )
 
     scheduler.add_job(
@@ -1102,16 +1214,16 @@ def create_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         run_mentions_job,
-        CronTrigger(hour="*/6", minute=30, timezone=tz),
+        CronTrigger(hour="*/6", minute=30, timezone=tz, jitter=600),  # ±10 min
         id="mentions_job",
-        name="Mention check + reply — Every 6 hours",
+        name="Mention check + reply — Every 6 hours (±10 min)",
     )
 
     scheduler.add_job(
         run_follow_back_job,
-        CronTrigger(hour=14, minute=0, timezone=tz),
+        CronTrigger(hour=14, minute=0, timezone=tz, jitter=1800),  # ±30 min
         id="follow_back_job",
-        name="Follow-back check — Daily 14:00 WAT",
+        name="Follow-back check — ~14:00 WAT (±30 min)",
     )
 
     scheduler.add_job(
@@ -1130,9 +1242,9 @@ def create_scheduler() -> AsyncIOScheduler:
 
     scheduler.add_job(
         run_growth_job,
-        CronTrigger(hour=15, minute=0, timezone=tz),
+        CronTrigger(hour=15, minute=0, timezone=tz, jitter=2700),  # ±45 min
         id="growth_job",
-        name="Autonomous growth sweep — Daily 15:00 WAT",
+        name="Autonomous growth sweep — ~15:00 WAT (±45 min)",
     )
 
     scheduler.add_job(
