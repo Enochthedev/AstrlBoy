@@ -42,7 +42,10 @@ class FollowXSkill(BaseTool):
     version = "1.0.0"
 
     def __init__(self) -> None:
+        # bearer_token enables read operations (get_user in _resolve_user_id);
+        # OAuth 1.0a credentials handle the follow_user write operation
         self._client = tweepy.Client(
+            bearer_token=settings.twitter_bearer_token,
             consumer_key=settings.twitter_api_key,
             consumer_secret=settings.twitter_api_secret,
             access_token=settings.twitter_access_token,

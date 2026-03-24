@@ -821,36 +821,237 @@ async def cmd_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ── Conversation history ──────────────────────────────────────────
 
 # Per-chat rolling conversation history passed to the autonomous agent.
-# Keeps the last 20 messages (10 turns) so the agent remembers what it
-# said and did earlier in the same Telegram session.
-# Entries expire after 2 hours of inactivity.
-_HISTORY_MAX_MESSAGES = 20  # 10 user + 10 assistant
-_HISTORY_TTL_SECONDS = 7200  # 2 hours
+#
+# Design: rolling window + summary compression, like how a human remembers a chat.
+# - Keep the last 8 messages (4 turns) verbatim — the "working memory"
+# - When we hit that limit, summarize the oldest half with Haiku and discard them
+# - The summary is prepended as a synthetic turn so the agent still has context
+# - A /ctx command pins a persistent context note for the whole session
+# - A /newchat command resets the window entirely (new session, fresh slate)
+# - Entries auto-expire after 2 hours of inactivity
+#
+# Token savings vs old approach (20 messages, no summarization):
+# - System prompt: ~90% saved via cache_control in autonomous.py
+# - History: capped at ~10 messages max (8 fresh + 2 for summary) vs unbounded
+_HISTORY_MAX_FRESH = 8        # fresh verbatim messages to keep (4 turns)
+_HISTORY_SUMMARIZE_AT = 6     # compress oldest turns when fresh window hits this
+_HISTORY_TTL_SECONDS = 7200   # 2 hours
 
-# {chat_id: {"messages": deque[dict], "last_ts": float}}
+# {chat_id: {
+#   "messages": deque[dict],        # recent fresh messages (user/assistant)
+#   "last_ts": float,
+#   "summary": str | None,          # compressed summary of older turns
+#   "session_context": str | None,  # pinned context from /ctx command
+# }}
 _chat_history: dict[str, dict] = {}
 
 
+async def _summarize_old_turns(messages: list[dict]) -> str:
+    """Compress old conversation turns into a brief summary using Haiku.
+
+    Called when history exceeds the fresh window. Uses Haiku (fast + cheap) to
+    distill what was discussed so the agent still has memory without the full
+    token cost of keeping every message verbatim.
+
+    Args:
+        messages: List of {"role": str, "content": str} dicts to summarize.
+
+    Returns:
+        A compact summary string stored as session memory.
+    """
+    formatted = "\n".join(
+        f"{m['role'].upper()}: {str(m['content'])[:300]}"
+        for m in messages
+    )
+    try:
+        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        resp = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=250,
+            system=(
+                "You summarize conversations between Wave (human operator) and astrlboy (AI agent). "
+                "Write 2-3 sentences covering: what was requested, what tools/actions were used, "
+                "and any key outcomes or decisions. Be specific. Plain text only."
+            ),
+            messages=[{"role": "user", "content": f"Summarize:\n\n{formatted}"}],
+        )
+        return resp.content[0].text.strip()
+    except Exception:
+        turn_count = len(messages) // 2
+        return f"{turn_count} earlier turns (summary unavailable)"
+
+
+async def _maybe_compress_history(chat_id: str) -> None:
+    """Compress oldest turns into a summary when the fresh window is full.
+
+    Triggered before each new user message. If we've accumulated enough messages,
+    the oldest half gets summarized and discarded — keeping the deque lean.
+
+    Args:
+        chat_id: The Telegram chat ID to compress.
+    """
+    entry = _chat_history.get(chat_id)
+    if not entry:
+        return
+
+    messages = list(entry["messages"])
+    if len(messages) < _HISTORY_SUMMARIZE_AT:
+        return
+
+    # Split: compress oldest half, keep newest half verbatim
+    split = len(messages) // 2
+    to_compress = messages[:split]
+    to_keep = messages[split:]
+
+    # If there's already a summary, include it so we roll it forward
+    existing = entry.get("summary")
+    if existing:
+        summary_input = [
+            {"role": "user", "content": f"[Previous summary: {existing}]"},
+            {"role": "assistant", "content": "Got it."},
+            *to_compress,
+        ]
+    else:
+        summary_input = to_compress
+
+    new_summary = await _summarize_old_turns(summary_input)
+
+    entry["summary"] = new_summary
+    entry["messages"] = deque(to_keep, maxlen=_HISTORY_MAX_FRESH)
+
+    logger.info(
+        "history_compressed",
+        chat_id=chat_id,
+        compressed=len(to_compress),
+        kept=len(to_keep),
+    )
+
+
 def _get_history(chat_id: str) -> list[dict]:
-    """Return the conversation history for a chat, pruning expired entries."""
+    """Return the reconstructed conversation history for a chat.
+
+    Combines: optional pinned context + optional summary (as a synthetic exchange)
+    + fresh verbatim messages. Expired sessions return empty.
+
+    Args:
+        chat_id: The Telegram chat ID.
+
+    Returns:
+        List of {"role", "content"} dicts ready to pass as prior_messages.
+    """
     entry = _chat_history.get(chat_id)
     if not entry:
         return []
     if time.time() - entry["last_ts"] > _HISTORY_TTL_SECONDS:
         del _chat_history[chat_id]
         return []
-    return list(entry["messages"])
+
+    result: list[dict] = []
+
+    # Pinned session context (/ctx) goes first — always present for the agent
+    if entry.get("session_context"):
+        result += [
+            {"role": "user", "content": f"[Session context] {entry['session_context']}"},
+            {"role": "assistant", "content": "Got it, I'll keep that in mind."},
+        ]
+
+    # Compressed summary of older turns (if any)
+    if entry.get("summary"):
+        result += [
+            {"role": "user", "content": f"[Earlier in this session] {entry['summary']}"},
+            {"role": "assistant", "content": "Understood."},
+        ]
+
+    # Fresh verbatim messages
+    result += list(entry["messages"])
+    return result
 
 
 def _append_history(chat_id: str, role: str, content: str) -> None:
-    """Append a message to the chat history."""
+    """Append a message to the chat history.
+
+    Args:
+        chat_id: The Telegram chat ID.
+        role: "user" or "assistant".
+        content: Message text.
+    """
     if chat_id not in _chat_history:
         _chat_history[chat_id] = {
-            "messages": deque(maxlen=_HISTORY_MAX_MESSAGES),
+            "messages": deque(maxlen=_HISTORY_MAX_FRESH),
             "last_ts": time.time(),
+            "summary": None,
+            "session_context": None,
         }
     _chat_history[chat_id]["messages"].append({"role": role, "content": content})
     _chat_history[chat_id]["last_ts"] = time.time()
+
+
+def _set_session_context(chat_id: str, context: str) -> None:
+    """Pin a persistent context note for the session.
+
+    Args:
+        chat_id: The Telegram chat ID.
+        context: Context string to pin.
+    """
+    if chat_id not in _chat_history:
+        _chat_history[chat_id] = {
+            "messages": deque(maxlen=_HISTORY_MAX_FRESH),
+            "last_ts": time.time(),
+            "summary": None,
+            "session_context": None,
+        }
+    _chat_history[chat_id]["session_context"] = context
+    _chat_history[chat_id]["last_ts"] = time.time()
+
+
+def _clear_history(chat_id: str) -> None:
+    """Clear all history for a chat (session window reset).
+
+    Args:
+        chat_id: The Telegram chat ID.
+    """
+    _chat_history.pop(chat_id, None)
+
+
+async def cmd_newchat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reset the conversation window — start fresh with no history or context.
+
+    Use this when switching topics or when the agent seems confused by old context.
+
+    Usage: /newchat
+    """
+    chat_id = str(update.effective_chat.id)
+    _clear_history(chat_id)
+    await update.message.reply_text("Session cleared. Fresh start.")
+    logger.info("session_cleared", chat_id=chat_id)
+
+
+async def cmd_ctx(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pin a persistent context note for the current session.
+
+    The context is prepended to every message you send in this session,
+    so the agent always has it in mind. Useful for: setting a goal, describing
+    the audience, giving background on a project, or pointing at a specific account.
+
+    Usage: /ctx <text>
+    Example: /ctx we're targeting devs building on Base, keep things technical
+    Example: /ctx focus on mentorable.xyz today, here's the context: [paste]
+    """
+    if not context.args:
+        chat_id = str(update.effective_chat.id)
+        entry = _chat_history.get(chat_id)
+        current = entry.get("session_context") if entry else None
+        if current:
+            await update.message.reply_text(f"Current session context:\n\n{current}\n\nUse /ctx <new text> to replace it, or /newchat to clear everything.")
+        else:
+            await update.message.reply_text("No session context set.\n\nUsage: /ctx <text>")
+        return
+
+    ctx_text = " ".join(context.args)
+    chat_id = str(update.effective_chat.id)
+    _set_session_context(chat_id, ctx_text)
+    await update.message.reply_text(f"Context pinned for this session:\n\n{ctx_text}")
+    logger.info("session_context_set", chat_id=chat_id)
 
 
 async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -859,14 +1060,14 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     Passes rolling conversation history to the agent so it remembers
     what it said and did earlier in the same Telegram session.
 
+    History management:
+    - Fresh messages kept verbatim (last 4 turns)
+    - Older turns compressed to a summary via Haiku before being discarded
+    - Pinned session context (/ctx) always prepended
+    - Reply-to messages injected as explicit context
+
     The autonomous agent has access to ALL registered skills as tools.
     Claude decides which tools to call based on the instruction.
-
-    Examples:
-    - "write a tweet about AI agents taking over" → searches trends, drafts, posts
-    - "what's trending in crypto?" → uses search + analyze_trending_content
-    - "find accounts to follow in the AI space" → uses find_relevant_accounts + follow_x
-    - "research what people think about Claude" → uses extract_sentiment + research_topic
     """
     # Only respond to the operator's chat
     if str(update.effective_chat.id) != settings.telegram_chat_id:
@@ -882,6 +1083,14 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         from agent.autonomous import run_autonomous
 
+        # If Wave is replying to a specific message, inject it as context.
+        # This is the "tag" mechanic — reply to any message to make it part of the task.
+        task = user_text
+        replied = update.message.reply_to_message
+        if replied and replied.text and replied.text != user_text:
+            quoted = replied.text[:400].replace("\n", " ")
+            task = f'[Referring to: "{quoted}"]\n\n{user_text}'
+
         # Get the active contract for context (default: astrlboy's own)
         contract = None
         try:
@@ -893,13 +1102,16 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
 
-        # Retrieve conversation history so the agent remembers prior turns
+        # Compress old turns before adding the new message — keeps the window lean
+        await _maybe_compress_history(chat_id)
+
+        # Retrieve history (summary + fresh) and append the incoming message
         prior_messages = _get_history(chat_id)
-        _append_history(chat_id, "user", user_text)
+        _append_history(chat_id, "user", task)
 
         # Run the autonomous agent with all skills available
         agent_result = await run_autonomous(
-            task=user_text,
+            task=task,
             contract=contract,
             prior_messages=prior_messages,
         )
@@ -969,6 +1181,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /experiments — running experiments\n"
         "  /jobs — recent job applications\n"
         "  /escalations — unresolved escalations\n\n"
+        "Session\n"
+        "  /newchat — clear history, fresh start\n"
+        "  /ctx <text> — pin context for this session (e.g. 'focus on Base devs')\n"
+        "  /ctx — show current pinned context\n"
+        "  Reply to any message — inject it as context for your next message\n\n"
         "Free-form (autonomous agent)\n"
         "  Just send any message — astrlboy has access to ALL\n"
         "  27 skills and decides what to do:\n"
@@ -1016,6 +1233,8 @@ def create_telegram_app():
     app.add_handler(CommandHandler("mentions", cmd_mentions))
     app.add_handler(CommandHandler("auto", cmd_auto))
     app.add_handler(CommandHandler("manual", cmd_manual))
+    app.add_handler(CommandHandler("newchat", cmd_newchat))
+    app.add_handler(CommandHandler("ctx", cmd_ctx))
 
     # Free-form messages — must be last so commands get priority
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_message))

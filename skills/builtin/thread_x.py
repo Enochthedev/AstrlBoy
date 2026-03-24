@@ -52,6 +52,7 @@ class ThreadXSkill(BaseTool):
 
     def __init__(self) -> None:
         self._client = tweepy.Client(
+            bearer_token=settings.twitter_bearer_token,
             consumer_key=settings.twitter_api_key,
             consumer_secret=settings.twitter_api_secret,
             access_token=settings.twitter_access_token,

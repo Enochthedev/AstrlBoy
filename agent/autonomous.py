@@ -114,17 +114,20 @@ async def _build_recent_state() -> str:
         return ""
 
 
-async def _build_system_prompt(contract: Contract | None = None) -> str:
-    """Build the system prompt for the autonomous agent.
+async def _build_system_prompt_parts(contract: Contract | None = None) -> tuple[str, str]:
+    """Build system prompt split into stable (cacheable) and dynamic parts.
 
-    Includes identity, rules, contract context, learned playbook,
-    and recent interaction state so the agent remembers what it just did.
+    The static part never changes within a session — it gets cached by Anthropic's
+    prompt caching, saving ~90% of tokens on the repeated system prompt across all
+    tool-calling turns in a single run.
+
+    The dynamic part (recent state) changes each call and cannot be cached.
 
     Args:
         contract: Optional contract for client-specific context.
 
     Returns:
-        The system prompt string.
+        Tuple of (static_part, dynamic_part).
     """
     base = (
         "You are astrlboy — an autonomous AI agent that operates like a freelance contractor.\n"
@@ -191,10 +194,15 @@ async def _build_system_prompt(contract: Contract | None = None) -> str:
     except Exception:
         pass
 
-    # Inject recent interaction state so the agent knows what it just did
-    recent_state = await _build_recent_state()
+    static = base + mode_note + contract_context + playbook
+    dynamic = await _build_recent_state()
+    return static, dynamic
 
-    return base + mode_note + contract_context + playbook + recent_state
+
+async def _build_system_prompt(contract: Contract | None = None) -> str:
+    """Build the full system prompt as a string. Kept for backward-compatible callers."""
+    static, dynamic = await _build_system_prompt_parts(contract)
+    return static + dynamic
 
 
 async def _get_available_skills(contract: Contract | None = None) -> list[BaseTool]:
@@ -283,7 +291,19 @@ async def run_autonomous(
     if not tools:
         return AgentResult(text="No skills available.", turns=0)
 
-    system = system_prompt or await _build_system_prompt(contract)
+    # Build system prompt — static part gets cache_control so Anthropic caches it across
+    # all tool-calling turns in this run. Dynamic recent_state is left uncached since it
+    # changes every call. This alone saves ~90% of repeated system prompt tokens.
+    if system_prompt:
+        api_system: list[dict] = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+        system_str = system_prompt
+    else:
+        static_part, dynamic_part = await _build_system_prompt_parts(contract)
+        api_system = [{"type": "text", "text": static_part, "cache_control": {"type": "ephemeral"}}]
+        if dynamic_part.strip():
+            api_system.append({"type": "text", "text": dynamic_part})
+        system_str = static_part + dynamic_part
+
     # Prepend conversation history so the agent remembers prior turns
     messages: list[dict[str, Any]] = list(prior_messages or []) + [{"role": "user", "content": task}]
     all_tool_calls: list[dict] = []
@@ -304,7 +324,7 @@ async def run_autonomous(
                 response = await client.messages.create(
                     model=model,
                     max_tokens=4096,
-                    system=system,
+                    system=api_system,
                     tools=tools,
                     messages=messages,
                 )
@@ -323,14 +343,14 @@ async def run_autonomous(
                     )
                     await asyncio.sleep(wait)
                 else:
-                    # Final attempt — try OpenRouter if available
+                    # Final attempt — try OpenRouter if available (no cache_control support)
                     if settings.openrouter_api_key:
                         logger.info("autonomous_openrouter_fallback", turn=turn + 1)
                         from core.ai import create_message
                         response = await create_message(
                             model=model,
                             max_tokens=4096,
-                            system=system,
+                            system=system_str,
                             messages=messages,
                         )
                         # OpenRouter fallback doesn't support tools — return text only
