@@ -75,7 +75,6 @@ class AgentMemory:
         # Use contract_slug as user_id for per-client scoping
         await client.add(
             messages=[{"role": "assistant", "content": content}],
-            agent_id=self._agent_id,
             user_id=contract_slug or "global",
             metadata=metadata if metadata else None,
         )
@@ -101,7 +100,6 @@ class AgentMemory:
 
         kwargs: dict = {
             "query": query,
-            "agent_id": self._agent_id,
             "limit": limit,
         }
         if contract_slug:
@@ -129,7 +127,7 @@ class AgentMemory:
         """
         client = self._ensure_client()
 
-        kwargs: dict = {"agent_id": self._agent_id}
+        kwargs: dict = {}
         if contract_slug:
             kwargs["user_id"] = contract_slug
 
