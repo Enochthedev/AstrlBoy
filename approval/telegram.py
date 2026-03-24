@@ -837,11 +837,18 @@ _HISTORY_MAX_FRESH = 8        # fresh verbatim messages to keep (4 turns)
 _HISTORY_SUMMARIZE_AT = 6     # compress oldest turns when fresh window hits this
 _HISTORY_TTL_SECONDS = 7200   # 2 hours
 
+# Alert Wave when a single session exceeds this Claude spend.
+# At $3/MTok input + $15/MTok output, 25 cents ≈ a heavy 5-turn session.
+_SESSION_COST_ALERT_CENTS = 25
+
 # {chat_id: {
 #   "messages": deque[dict],        # recent fresh messages (user/assistant)
 #   "last_ts": float,
 #   "summary": str | None,          # compressed summary of older turns
 #   "session_context": str | None,  # pinned context from /ctx command
+#   "session_tokens_in": int,       # cumulative Claude input tokens this session
+#   "session_tokens_out": int,      # cumulative Claude output tokens this session
+#   "cost_alerted": bool,           # true once we've sent the cost warning
 # }}
 _chat_history: dict[str, dict] = {}
 
@@ -919,6 +926,18 @@ async def _maybe_compress_history(chat_id: str) -> None:
     entry["summary"] = new_summary
     entry["messages"] = deque(to_keep, maxlen=_HISTORY_MAX_FRESH)
 
+    # Persist the summary to long-term memory so the agent can recall this
+    # conversation in future sessions — even after /newchat clears the window.
+    try:
+        from memory.mem0_client import agent_memory
+        if agent_memory.available:
+            await agent_memory.add(
+                f"Telegram session memory: {new_summary}",
+                category="session_memory",
+            )
+    except Exception:
+        pass
+
     logger.info(
         "history_compressed",
         chat_id=chat_id,
@@ -981,6 +1000,9 @@ def _append_history(chat_id: str, role: str, content: str) -> None:
             "last_ts": time.time(),
             "summary": None,
             "session_context": None,
+            "session_tokens_in": 0,
+            "session_tokens_out": 0,
+            "cost_alerted": False,
         }
     _chat_history[chat_id]["messages"].append({"role": role, "content": content})
     _chat_history[chat_id]["last_ts"] = time.time()
@@ -999,6 +1021,9 @@ def _set_session_context(chat_id: str, context: str) -> None:
             "last_ts": time.time(),
             "summary": None,
             "session_context": None,
+            "session_tokens_in": 0,
+            "session_tokens_out": 0,
+            "cost_alerted": False,
         }
     _chat_history[chat_id]["session_context"] = context
     _chat_history[chat_id]["last_ts"] = time.time()
@@ -1138,6 +1163,25 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Store agent response in history (without tool summary — that's display-only)
         _append_history(chat_id, "assistant", response_text.strip())
+
+        # Accumulate session token costs and alert Wave if spend is getting high.
+        # Sonnet 4.6: $3/MTok input, $15/MTok output.
+        entry = _chat_history.get(chat_id)
+        if entry and agent_result.input_tokens:
+            entry["session_tokens_in"] += agent_result.input_tokens
+            entry["session_tokens_out"] += agent_result.output_tokens
+            session_cost_cents = (
+                entry["session_tokens_in"] * 3 / 1_000_000 * 100 +
+                entry["session_tokens_out"] * 15 / 1_000_000 * 100
+            )
+            if session_cost_cents >= _SESSION_COST_ALERT_CENTS and not entry["cost_alerted"]:
+                entry["cost_alerted"] = True
+                cost_str = f"${session_cost_cents / 100:.2f}"
+                await update.message.reply_text(
+                    f"heads up — this session has used {cost_str} in Claude tokens "
+                    f"({entry['session_tokens_in']:,} in / {entry['session_tokens_out']:,} out). "
+                    f"Send /newchat to start fresh and cut costs."
+                )
 
         # Telegram max message length is 4096
         if len(full_response) <= 4096:

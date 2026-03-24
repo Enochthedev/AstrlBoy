@@ -60,6 +60,7 @@ from skills.builtin.delete_tweet_x import DeleteTweetXSkill
 from skills.builtin.bookmark_x import BookmarkXSkill
 from skills.builtin.get_user_tweets_x import GetUserTweetsXSkill
 from skills.builtin.check_email_status import CheckEmailStatusSkill
+from skills.builtin.remember import RememberSkill
 from skills.registry import skill_registry
 
 logger = get_logger("main")
@@ -187,6 +188,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Stream + approval
         TrendStreamSkill, DraftApprovalSkill,
         GetMentionsSkill, GetTimelineSkill,
+        # Memory
+        RememberSkill,
     ]:
         try:
             await skill_registry.register(skill_cls())

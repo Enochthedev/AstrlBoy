@@ -37,7 +37,9 @@ class AgentResult:
     tool_calls: list[dict] = field(default_factory=list)
     turns: int = 0
     duration_ms: int = 0
-    run_id: str = ""  # R2 key for the full trace — link content/interactions back to this
+    run_id: str = ""        # R2 key for the full trace — link content/interactions back to this
+    input_tokens: int = 0   # Total input tokens across all turns — for cost tracking
+    output_tokens: int = 0  # Total output tokens across all turns
 
 
 def _skills_to_tools(skills: list[BaseTool]) -> list[dict]:
@@ -294,14 +296,44 @@ async def run_autonomous(
     if not tools:
         return AgentResult(text="No skills available.", turns=0)
 
+    # Recall relevant long-term memories before building the system prompt.
+    # Searched semantically — so "engagement patterns" matches even if the task
+    # uses different wording. Injected into the dynamic (uncached) section so they're
+    # fresh per run without busting the cache on the stable static content.
+    recalled: list[str] = []
+    try:
+        from memory.mem0_client import agent_memory
+        if agent_memory.available:
+            contract_slug = contract.client_slug if contract else None
+            # Contract-scoped memories first (most relevant)
+            if contract_slug:
+                recalled = await agent_memory.search(query=task, contract_slug=contract_slug, limit=5)
+            # Top up with global memories (preferences, cross-contract patterns)
+            global_mems = await agent_memory.search(query=task, limit=4)
+            for m in global_mems:
+                if m not in recalled:
+                    recalled.append(m)
+            recalled = recalled[:7]  # cap total to keep prompt lean
+    except Exception:
+        pass
+
     # Build system prompt — static part gets cache_control so Anthropic caches it across
-    # all tool-calling turns in this run. Dynamic recent_state is left uncached since it
-    # changes every call. This alone saves ~90% of repeated system prompt tokens.
+    # all tool-calling turns in this run. Dynamic section (recent state + recalled memories)
+    # is left uncached since it changes per run.
     if system_prompt:
         api_system: list[dict] = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
         system_str = system_prompt
     else:
         static_part, dynamic_part = await _build_system_prompt_parts(contract)
+
+        # Prepend recalled memories to the dynamic section so the agent knows what
+        # it already knows — and doesn't ask Wave to repeat context from past sessions.
+        if recalled:
+            memory_block = "\nWHAT I REMEMBER (from past sessions — use this before asking Wave for context):\n"
+            memory_block += "\n".join(f"- {m}" for m in recalled)
+            memory_block += "\n"
+            dynamic_part = memory_block + dynamic_part
+
         api_system = [{"type": "text", "text": static_part, "cache_control": {"type": "ephemeral"}}]
         if dynamic_part.strip():
             api_system.append({"type": "text", "text": dynamic_part})
@@ -310,6 +342,8 @@ async def run_autonomous(
     # Prepend conversation history so the agent remembers prior turns
     messages: list[dict[str, Any]] = list(prior_messages or []) + [{"role": "user", "content": task}]
     all_tool_calls: list[dict] = []
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
 
     logger.info(
         "autonomous_run_started",
@@ -363,6 +397,11 @@ async def run_autonomous(
         if response is None:
             break
 
+        # Accumulate token usage for cost tracking
+        if hasattr(response, "usage") and response.usage:
+            total_input_tokens += getattr(response.usage, "input_tokens", 0)
+            total_output_tokens += getattr(response.usage, "output_tokens", 0)
+
         # Extract text blocks
         text_parts = []
         tool_use_blocks = []
@@ -406,6 +445,8 @@ async def run_autonomous(
                 turns=turn + 1,
                 duration_ms=duration,
                 run_id=str(run_id),
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
             )
 
         # Add assistant response to messages
@@ -513,4 +554,6 @@ async def run_autonomous(
         turns=max_turns,
         duration_ms=duration,
         run_id=str(run_id),
+        input_tokens=total_input_tokens,
+        output_tokens=total_output_tokens,
     )
